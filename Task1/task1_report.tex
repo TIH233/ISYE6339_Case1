@@ -1,0 +1,227 @@
+\documentclass[11pt,letterpaper]{article}
+
+% Packages
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+
+% Title
+\title{BotWorld European Market Expansion:\\Demand and Sales Forecast Analysis}
+\author{Task 1: Market Demand Forecast \& Scenario Generation}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Methodology}
+
+\subsection{Demand Simulator Design}
+
+We developed a Monte Carlo simulator to model daily demand for BotWorld's MyBot product line across European markets (2027-2034). The simulator incorporates stochastic elements to capture uncertainty in market adoption and seasonal patterns.
+
+\subsection{Population Projection}
+
+We extracted population data for 29 countries and 273 metropolitan areas from public sources. Future populations were projected using country-specific annual growth rates. Markets were segmented into Metro (cities) and Non-Metro (remaining country population).
+
+\subsection{Annual Demand Generation}
+
+Annual demand per market segment was calculated as:
+\begin{equation}
+D_{annual} = Population \times AdoptionRate
+\end{equation}
+
+Adoption rates followed triangular distributions with pessimistic (0.02\%), most probable (0.025\%), and optimistic (0.05\%) scenarios for Year 1, with incremental changes in subsequent years.
+
+\subsection{Product Mix Allocation}
+
+Total demand was decomposed into 24 product models using triangular distributions centered on most-probable market shares with $\pm20\%$ variation bounds. Model shares were drawn independently for each simulation and year.
+
+\subsection{Temporal Decomposition}
+
+Annual demand was distributed across 13 four-week periods using normally distributed period shares (CV=25\%). Cyber Week (Black Friday to Cyber Monday) accounted for 15\% of annual demand as a separate peak event. Daily allocation within periods used fixed day-of-week probabilities.
+
+\subsection{OTD Sensitivity Modeling}
+
+We implemented order-to-delivery (OTD) time sensitivity using linear interpolation on conversion probability tables. Key modeling decision: OTD conversion was applied at aggregate segment level before product decomposition to avoid over-multiplication.
+
+The conversion pipeline:
+\begin{enumerate}
+\item Aggregate daily demand by (Date, Country, Segment)
+\item Apply OTD conversion rate $\rightarrow$ Segment sales
+\item Decompose to 24 products using model shares
+\end{enumerate}
+
+\subsection{Scenario Framework}
+
+Five OTD scenarios were analyzed:
+\begin{itemize}
+\item Same-Day Metro: 0 days (Metro), 5 days (Non-Metro)
+\item Aggressive: 1 day (Metro), 3 days (Non-Metro)
+\item Baseline: 2 days (Metro), 5 days (Non-Metro)
+\item Conservative: 3.5 days (Metro), 8 days (Non-Metro)
+\item Slow Delivery: 6 days (Metro), 15 days (Non-Metro)
+\end{itemize}
+
+\subsection{Computational Optimization}
+
+To manage computational complexity, metro cities were aggregated to country-level before generating output records. This reduced potential record count from $\sim$191M to $\sim$12M (with 3 simulations) while maintaining analytical validity.
+
+\section{Results and Analysis}
+
+\subsection{Baseline Demand Projections}
+
+Figure \ref{fig:annual_demand} shows annual demand forecasts under same-day delivery assumption. Demand grows from approximately 200K units in 2027 to over 1M units by 2034, driven by market expansion and adoption rate evolution.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task4_annual_demand_scenarios.png}
+\caption{Annual demand scenarios across 8-year horizon (2027-2034)}
+\label{fig:annual_demand}
+\end{figure}
+
+Revenue projections (Figure \ref{fig:annual_revenue}) demonstrate parallel growth from approximately EUR 100M to EUR 500M annually, reflecting both volume growth and product mix dynamics.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task4_annual_units_revenue.png}
+\caption{Annual units and revenue projections}
+\label{fig:annual_revenue}
+\end{figure}
+
+\subsection{Temporal Demand Patterns}
+
+Daily demand exhibits significant temporal variation (Figure \ref{fig:daily_timeseries}). Cyber Week peaks are clearly visible as sharp spikes, accounting for 15\% of annual volume compressed into 4 days. Four-week period patterns show expected seasonality with elevated demand in Q4.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{task4_daily_demand_timeseries.png}
+\caption{Daily demand time series showing seasonal patterns and Cyber Week spikes}
+\label{fig:daily_timeseries}
+\end{figure}
+
+Demand variability across simulations is characterized in Figure \ref{fig:daily_boxplot}. Box plots reveal the stochastic range, with interquartile ranges indicating robust forecast bounds for capacity planning.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task4_daily_demand_boxplot.png}
+\caption{Daily demand distribution across simulation runs}
+\label{fig:daily_boxplot}
+\end{figure}
+
+\subsection{Demand Structure Analysis}
+
+The period-day-of-week heatmap (Figure \ref{fig:heatmap_period}) reveals interaction between seasonal and weekly patterns. Wednesday and Thursday consistently show higher demand proportions across most periods.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task4_heatmap_period_dow.png}
+\caption{Demand concentration by four-week period and day-of-week}
+\label{fig:heatmap_period}
+\end{figure}
+
+Product mix analysis (Figure \ref{fig:model_mix}) shows stable shares across the forecast horizon, dominated by Floor Care and Kitchen Help categories (F10, K10, F20 models), which collectively account for approximately 40\% of total demand.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task4_model_mix.png}
+\caption{Product model mix distribution over time}
+\label{fig:model_mix}
+\end{figure}
+
+\subsection{OTD Scenario Impact Analysis}
+
+OTD sensitivity analysis reveals significant sales conversion differences across scenarios (Figure \ref{fig:sales_heatmap}). Same-Day Metro scenario achieves near-100\% conversion in metro markets, while Slow Delivery scenarios experience substantial sales loss, particularly in price-sensitive metro segments.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task6_heatmap_sales_by_scenario.png}
+\caption{Sales performance heatmap across OTD scenarios}
+\label{fig:sales_heatmap}
+\end{figure}
+
+Conversion rate patterns (Figure \ref{fig:conversion_heatmap}) quantify the relationship between promised OTD and customer purchase probability. Metro markets show steeper sensitivity curves compared to non-metro regions.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task6_heatmap_conversion_by_scenario.png}
+\caption{OTD conversion rates by market segment and scenario}
+\label{fig:conversion_heatmap}
+\end{figure}
+
+\subsection{Daily Sales Dynamics}
+
+Daily sales patterns for 2030 (Figure \ref{fig:sales_timeseries}) demonstrate scenario divergence. Aggressive and Same-Day Metro scenarios track closely to baseline demand, while Conservative and Slow Delivery scenarios show 20-40\% reductions.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{task6_timeseries_daily_sales_2030.png}
+\caption{Daily sales time series for year 2030 across scenarios}
+\label{fig:sales_timeseries}
+\end{figure}
+
+Sales variability (Figure \ref{fig:sales_boxplot}) quantifies stochastic uncertainty within each scenario. Median sales decline systematically with longer OTD promises.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task6_boxplot_daily_sales_2030.png}
+\caption{Daily sales distribution by scenario (2030)}
+\label{fig:sales_boxplot}
+\end{figure}
+
+\subsection{Revenue and Lost Sales Analysis}
+
+Cumulative revenue comparison (Figure \ref{fig:revenue_scenarios}) highlights the financial impact of OTD performance. Same-Day Metro scenario generates approximately 15\% higher revenue than Baseline, while Slow Delivery loses 25-30\% compared to Baseline.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task6_barchart_revenue_by_scenario.png}
+\caption{Total revenue by OTD scenario (2027-2034)}
+\label{fig:revenue_scenarios}
+\end{figure}
+
+Lost sales analysis (Figure \ref{fig:lost_sales}) quantifies opportunity cost of slower delivery. Over the 8-year horizon, Conservative scenario loses approximately EUR 400M in potential revenue, while Slow Delivery loses EUR 800M+ compared to ideal same-day delivery.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{task6_lost_sales_by_scenario.png}
+\caption{Cumulative lost sales by scenario relative to maximum potential}
+\label{fig:lost_sales}
+\end{figure}
+
+\section{Key Insights}
+
+\subsection{Market Growth Trajectory}
+
+European demand for MyBot products demonstrates robust growth potential, expanding 5x from 2027 to 2034. This growth is driven by geographic expansion (4-phase rollout) and increasing adoption rates in established markets.
+
+\subsection{Seasonality and Peak Management}
+
+Cyber Week concentration (15\% of annual demand in 4 days) creates significant operational challenges. Peak-to-average demand ratios exceed 10:1 during these events, requiring substantial surge capacity or inventory buffering strategies.
+
+\subsection{OTD as Critical Success Factor}
+
+OTD performance is the dominant driver of sales realization. A 1-day improvement in metro OTD (from 2 to 1 day) yields approximately EUR 150M incremental revenue over 8 years. Metro markets exhibit higher OTD sensitivity than non-metro regions.
+
+\subsection{Product Portfolio Balance}
+
+Demand concentrates in mid-tier products (levels 10 and 20), which account for 70\% of volume. Premium products (levels 30 and 50) represent only 20\% of units but contribute disproportionately to revenue due to higher prices.
+
+\subsection{Stochastic Risk Management}
+
+Monte Carlo simulations reveal substantial demand uncertainty. The 90th percentile exceeds median forecasts by 25-35\%, indicating need for flexible capacity and inventory policies to maintain high service levels.
+
+\subsection{Geographic Concentration}
+
+Metro markets account for approximately 60\% of total demand despite representing only 40\% of population, reflecting higher adoption rates in urban areas. This concentration justifies differentiated logistics strategies.
+
+\subsection{Recommendation}
+
+BotWorld should prioritize aggressive OTD targets for metro markets to maximize revenue capture. Investment in rapid fulfillment infrastructure (deployment centers near major metro areas, expedited transportation) will yield strong returns through higher conversion rates. Non-metro markets can tolerate 3-5 day OTD without severe sales degradation, allowing cost-optimized distribution strategies.
+
+\end{document}

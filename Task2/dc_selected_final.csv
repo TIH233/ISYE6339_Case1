@@ -1,0 +1,5 @@
+country,city,candidate,cca2,cand_id,lat,lng
+Germany,Koeln,1,DE,CAND_DE_koeln,50.9333,6.95
+Poland,Lodz,1,PL,CAND_PL_lodz,51.7706,19.4739
+Italy,Rome,1,IT,CAND_IT_rome,41.8919,12.5113
+Spain,Madrid,1,ES,CAND_ES_madrid,40.4165,-3.70256
