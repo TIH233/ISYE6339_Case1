@@ -1,0 +1,6 @@
+source,field,issue,fix,impact
+Metro cities_location,ing,Typo for lng column header,Renamed to 'lng' on read in data_loader.py,Longitude coordinates correctly parsed for all 273 metro cities
+Metro cities_location,Countries,NaN rows (run-down / merged-cell pattern),Forward-fill applied on read in data_loader.py,Country assignment correct for all 273 metro cities
+Metro cities_location,Czech Republic,Metro sheet uses 'Czech Republic'; config uses 'Czechia' / ISO code CZ,Added alias 'Czech Republic' → 'CZ' in COUNTRY_NAME_TO_CODE,CZ metro cities correctly tagged; no orphan nodes
+Metro cities_location,Rotterdam,Rotterdam appears in metro list AND is needed as the ocean PORT entry node,Split: PORT_NL_rotterdam (type=PORT) + METRO_NL_rotterdam (type=PERI_URBAN_HUB),"Two nodes for Rotterdam; port has no demand, hub has pop=1.03M"
+Metro cities_location,DC cities,"Koeln, Lodz, Madrid, Rome appear in metro list but also are DC locations",These cities kept only as type=DC; excluded from PERI_URBAN_HUB creation,No duplicate node_ids; DC nodes serve hub role implicitly

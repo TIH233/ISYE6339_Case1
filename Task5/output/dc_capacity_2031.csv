@@ -1,0 +1,5 @@
+dc_id,annual_units,mean_peak_daily_units,p50_peak_daily_units,p95_peak_daily_units,p99_peak_daily_units,throughput_cap_pallets,storage_positions,dc_fixed_cost_eur,dc_storage_cost_eur,dc_throughput_cost_eur,dc_pick_cost_eur,dc_total_cost_eur
+CAND_DE_koeln,116363.0,3491.0,3494.0,4337.0,4613.0,1446,744,600000,81840,36150,349089.0,1241616.0
+CAND_ES_madrid,33531.0,1006.0,999.0,1237.0,1353.0,414,215,600000,23650,10350,100593.0,784885.0
+CAND_IT_rome,44814.0,1344.0,1352.0,1679.0,1840.0,560,287,600000,31570,14000,134442.0,847233.0
+CAND_PL_lodz,66054.0,1982.0,1979.0,2462.0,2709.0,822,423,600000,46530,20550,198162.0,964323.0
