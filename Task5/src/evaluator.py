@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
 from .config import (
     # Geometry
@@ -33,7 +32,7 @@ from .config import (
     DC_FIXED_EUR_YEAR, DC_STORAGE_EUR, DC_THROUGHPUT_EUR,
     DC_INBOUND_PALLET_EUR, DC_OUTBOUND_PALLET_EUR, DC_UNIT_PICK_EUR,
     LASTMILE_METRO_1M_EUR, LASTMILE_METRO_250K_EUR, LASTMILE_METRO_SMALL_EUR,
-    LASTMILE_NONMETRO_250KM_EUR,
+    LASTMILE_NONMETRO_250KM_EUR, LASTMILE_NONMETRO_500KM_EUR, LASTMILE_NONMETRO_BEYOND_EUR,
     PI_PACK_COST_EUR, NON_PI_PACK_COST_EUR,
     HUB_RELAY_COST_EUR, HUB_CONSOL_COST_EUR,
     TRANSLOAD_COST_EUR, OCEAN_CONTAINER_EUR, OCEAN_SAVANNAH_ROTTERDAM_KM,
@@ -49,8 +48,6 @@ from .config import (
     CYBER_WEEK_ANNUAL_SHARE, CYBER_WEEK_DAYS, PEAK_DAILY_SHARE,
     # Revenue
     REVENUE_PER_UNIT_EUR,
-    # PI OTD
-    PI_OTD_BY_SEGMENT,
 )
 from .hub_network import haversine_km, drive_time_hr
 
@@ -63,6 +60,18 @@ def _co2_per_km(truck_class: str) -> float:
     return {"L": CO2_TRUCK_L_KG_KM, "M": CO2_TRUCK_M_KG_KM, "S": CO2_TRUCK_S_KG_KM}.get(
         truck_class, CO2_TRUCK_L_KG_KM
     )
+
+
+def extract_dc_daily_totals(dc_daily_sim: pd.DataFrame) -> pd.DataFrame:
+    if dc_daily_sim.empty:
+        return pd.DataFrame(columns=["sim", "date", "dc_id", "daily_units"])
+    daily = (
+        dc_daily_sim.groupby(["sim", "date", "euro_dc_id"], as_index=False)["realized_units"]
+        .sum()
+        .rename(columns={"euro_dc_id": "dc_id", "realized_units": "daily_units"})
+    )
+    daily["date"] = pd.to_datetime(daily["date"])
+    return daily
 
 
 # ============================================================================
@@ -140,10 +149,10 @@ def compute_dc_dc_connectivity(active_nodes: pd.DataFrame, lanes: pd.DataFrame) 
     }
 
 
-def compute_detour_summary(lanes: pd.DataFrame) -> dict:
-    if lanes.empty or "detour_ratio" not in lanes.columns:
+def compute_detour_summary(route_table: pd.DataFrame) -> dict:
+    if route_table.empty or "detour_ratio" not in route_table.columns:
         return {"mean_detour": None, "max_detour": None, "pct_within_limit": None}
-    dr = lanes["detour_ratio"].dropna()
+    dr = route_table["detour_ratio"].dropna()
     return {
         "mean_detour":       round(float(dr.mean()), 3),
         "median_detour":     round(float(dr.median()), 3),
@@ -209,80 +218,89 @@ def eval_52_container_requirements(annual_units: float) -> dict:
 # ============================================================================
 
 def simulate_otd_attainment(
-    direct_lanes: pd.DataFrame,
+    routes: pd.DataFrame,
     hub_brackets: pd.DataFrame,
     n_sim: int = DEFAULT_N_SIM,
     seed: int = RANDOM_SEED,
 ) -> pd.DataFrame:
     """
-    Task 5.3: Monte Carlo simulation of PI OTD promise attainment.
-
-    For each DC→PERI_URBAN_HUB direct lane, simulate n_sim trips:
-      - Drive speed: Normal(100 km/h, σ=10 km/h) → drive_time uncertainty
-      - Hub dwell: Uniform(0.75, 1.25) × nominal dwell
-    Check if total elapsed ≤ PI promise (4/2/1 hr by pop_bracket).
-
-    Pattern: pandas-in → numpy-compute → pandas-out.
-
-    Returns DataFrame: node_id, pop_bracket, pi_promise_hr, mean_drive_hr,
-      attainment_rate, p5_elapsed_hr, p50_elapsed_hr, p95_elapsed_hr
+    Task 5.3: Monte Carlo simulation of PI route promise attainment.
     """
-    if direct_lanes.empty or hub_brackets.empty:
+    if routes.empty or hub_brackets.empty:
         return pd.DataFrame()
 
-    df = direct_lanes.merge(hub_brackets[["node_id", "pop_bracket"]], on="node_id", how="left")
+    best_routes = (
+        routes.sort_values(["dest_hub", "total_elapsed_hr", "detour_ratio"])
+        .drop_duplicates(subset=["dest_hub"], keep="first")
+        .copy()
+    )
+    df = best_routes.merge(
+        hub_brackets[["node_id", "pop_bracket"]],
+        left_on="dest_hub",
+        right_on="node_id",
+        how="left",
+    )
     df = df.dropna(subset=["pop_bracket"])
     if df.empty:
         return pd.DataFrame()
 
-    # PI promise lookup
     promise_map = {"1M+": 4.0, "250K-1M": 2.0, "<250K": 1.0}
     df["pi_promise_hr"] = df["pop_bracket"].map(promise_map).fillna(4.0)
 
-    # ---- numpy kernel ----
     rng = np.random.default_rng(seed)
     n_hubs = len(df)
 
-    base_drive  = df["drive_time_hr"].values                    # (n_hubs,)
-    base_dwell  = np.full(n_hubs, HUB_RELAY_DWELL_HR)          # (n_hubs,)
-    promises    = df["pi_promise_hr"].values                     # (n_hubs,)
-    road_km     = df["road_km"].values                           # (n_hubs,)
+    base_drive = (
+        df["total_elapsed_hr"].to_numpy(dtype=float)
+        - df["n_relay_stops"].to_numpy(dtype=float) * HUB_RELAY_DWELL_HR
+        - df["n_consol_stops"].to_numpy(dtype=float) * HUB_CONSOL_DWELL_HR
+    )
+    base_drive = np.clip(base_drive, 0.0, None)
+    road_km = df["total_distance_km"].to_numpy(dtype=float)
+    promises = df["pi_promise_hr"].to_numpy(dtype=float)
 
-    # Speed factor: Normal(1, sigma) — lower = slower → more time
-    speed_factor  = rng.normal(1.0, DRIVE_SPEED_SIGMA_FRAC, size=(n_sim, n_hubs))
-    speed_factor  = np.clip(speed_factor, 0.5, 1.8)
-
-    # Dwell multiplier: Uniform(1-frac, 1+frac)
-    dwell_factor  = rng.uniform(
+    speed_factor = rng.normal(1.0, DRIVE_SPEED_SIGMA_FRAC, size=(n_sim, n_hubs))
+    speed_factor = np.clip(speed_factor, 0.5, 1.8)
+    relay_dwell_factor = rng.uniform(
+        1.0 - DWELL_UNCERTAINTY_FRAC,
+        1.0 + DWELL_UNCERTAINTY_FRAC,
+        size=(n_sim, n_hubs),
+    )
+    consol_dwell_factor = rng.uniform(
         1.0 - DWELL_UNCERTAINTY_FRAC,
         1.0 + DWELL_UNCERTAINTY_FRAC,
         size=(n_sim, n_hubs),
     )
 
-    # Simulated elapsed (n_sim, n_hubs)
-    sim_drive   = base_drive[None, :] / speed_factor
-    sim_dwell   = base_dwell[None, :] * dwell_factor
-    sim_elapsed = sim_drive + sim_dwell                         # (n_sim, n_hubs)
+    sim_drive = base_drive[None, :] / speed_factor
+    sim_relay_dwell = (
+        df["n_relay_stops"].to_numpy(dtype=float)[None, :]
+        * HUB_RELAY_DWELL_HR
+        * relay_dwell_factor
+    )
+    sim_consol_dwell = (
+        df["n_consol_stops"].to_numpy(dtype=float)[None, :]
+        * HUB_CONSOL_DWELL_HR
+        * consol_dwell_factor
+    )
+    sim_elapsed = sim_drive + sim_relay_dwell + sim_consol_dwell
 
-    # Attainment: fraction of sims where elapsed ≤ promise
-    attainment  = (sim_elapsed <= promises[None, :]).mean(axis=0)   # (n_hubs,)
-
-    p5  = np.percentile(sim_elapsed, 5,  axis=0)
+    attainment = (sim_elapsed <= promises[None, :]).mean(axis=0)
+    p5 = np.percentile(sim_elapsed, 5, axis=0)
     p50 = np.percentile(sim_elapsed, 50, axis=0)
     p95 = np.percentile(sim_elapsed, 95, axis=0)
 
-    # Non-PI baseline OTD: deterministic drive + 8hr last-mile (1M+ metro)
-    nonpi_otd_mean = base_drive + 8.0    # approximate non-PI elapsed for comparison
-
-    result = df[["node_id", "pop_bracket", "pi_promise_hr", "drive_time_hr"]].copy()
-    result["mean_drive_hr"]    = base_drive.round(3)
-    result["road_km"]          = road_km.round(1)
-    result["attainment_rate"]  = attainment.round(4)
-    result["p5_elapsed_hr"]    = p5.round(3)
-    result["p50_elapsed_hr"]   = p50.round(3)
-    result["p95_elapsed_hr"]   = p95.round(3)
-    result["nonpi_otd_est_hr"] = nonpi_otd_mean.round(3)
-    result["otd_saving_hr"]    = (nonpi_otd_mean - p50).round(3)
+    result = df[
+        ["dest_hub", "origin_dc", "service_mode", "pop_bracket", "pi_promise_hr"]
+    ].copy()
+    result = result.rename(columns={"dest_hub": "node_id"})
+    result["mean_drive_hr"] = base_drive.round(3)
+    result["road_km"] = road_km.round(1)
+    result["attainment_rate"] = attainment.round(4)
+    result["p5_elapsed_hr"] = p5.round(3)
+    result["p50_elapsed_hr"] = p50.round(3)
+    result["p95_elapsed_hr"] = p95.round(3)
+    result["promise_gap_hr"] = (result["p50_elapsed_hr"] - result["pi_promise_hr"]).round(3)
 
     return result.reset_index(drop=True)
 
@@ -296,8 +314,7 @@ def summarise_otd_by_bracket(otd_df: pd.DataFrame) -> pd.DataFrame:
         pi_promise_hr=("pi_promise_hr", "first"),
         mean_attainment=("attainment_rate", "mean"),
         mean_p50_elapsed=("p50_elapsed_hr", "mean"),
-        mean_nonpi_otd=("nonpi_otd_est_hr", "mean"),
-        mean_saving_hr=("otd_saving_hr", "mean"),
+        mean_promise_gap_hr=("promise_gap_hr", "mean"),
     ).reset_index()
     grp["mean_attainment"] = grp["mean_attainment"].round(4)
     return grp
@@ -488,51 +505,204 @@ def eval_56_autonomy(active_nodes: pd.DataFrame, lanes: pd.DataFrame, year: int)
 # PART 8 — Task 5.9: Shipment / truck / distance / cost / carbon
 # ============================================================================
 
+def _lastmile_cost_per_unit(node_type: str, pop_bracket: str | float, last_mile_hr: float) -> float:
+    if str(node_type).lower() == "metro":
+        if pd.isna(pop_bracket):
+            return LASTMILE_METRO_SMALL_EUR
+        if pop_bracket == "1M+":
+            return LASTMILE_METRO_1M_EUR
+        if pop_bracket == "250K-1M":
+            return LASTMILE_METRO_250K_EUR
+        return LASTMILE_METRO_SMALL_EUR
+
+    if last_mile_hr <= 2.5:
+        return LASTMILE_NONMETRO_250KM_EUR
+    if last_mile_hr <= 5.0:
+        return LASTMILE_NONMETRO_500KM_EUR
+    return LASTMILE_NONMETRO_BEYOND_EUR
+
+
+def _service_units_column(service_matrix: pd.DataFrame) -> str:
+    if "pi_realized_units" in service_matrix.columns:
+        return "pi_realized_units"
+    return "annual_realized_units"
+
+
+def _estimate_dc_operating_costs(
+    annual_units_by_dc: dict[str, float],
+    units_per_pallet: int,
+) -> pd.DataFrame:
+    records = []
+    for dc_id, annual_units in annual_units_by_dc.items():
+        peak_daily_units = annual_units * PEAK_DAILY_SHARE
+        throughput_cap = int(np.ceil(peak_daily_units / max(units_per_pallet, 1))) * 2
+        storage_positions = int(np.ceil((annual_units / 365.0) * 14.0 / max(units_per_pallet, 1)))
+
+        storage_cost = storage_positions * DC_STORAGE_EUR
+        throughput_cost = throughput_cap * DC_THROUGHPUT_EUR
+        inbound_cost = int(np.ceil(annual_units / max(units_per_pallet, 1))) * DC_INBOUND_PALLET_EUR
+        outbound_cost = int(np.ceil(annual_units / max(units_per_pallet, 1))) * DC_OUTBOUND_PALLET_EUR
+        pick_cost = annual_units * DC_UNIT_PICK_EUR
+        dc_total_cost = (
+            DC_FIXED_EUR_YEAR
+            + storage_cost
+            + throughput_cost
+            + inbound_cost
+            + outbound_cost
+            + pick_cost
+        )
+
+        records.append(
+            {
+                "dc_id": dc_id,
+                "annual_units": annual_units,
+                "throughput_cap_pallets": throughput_cap,
+                "storage_positions": storage_positions,
+                "dc_total_cost_eur": dc_total_cost,
+            }
+        )
+
+    return pd.DataFrame(records)
+
+
+def estimate_service_lastmile_cost(service_matrix: pd.DataFrame) -> float:
+    if service_matrix.empty:
+        return 0.0
+    units_col = _service_units_column(service_matrix)
+
+    per_unit_cost = service_matrix.apply(
+        lambda row: _lastmile_cost_per_unit(
+            row.get("node_type", ""),
+            row.get("pop_bracket", np.nan),
+            float(row.get("last_mile_hr", 0.0)),
+        ),
+        axis=1,
+    )
+    return float((per_unit_cost * service_matrix[units_col]).sum())
+
+
+def estimate_nonpi_baseline_costs(
+    baseline_assignment: pd.DataFrame,
+    nodes: pd.DataFrame | None = None,
+) -> dict:
+    if baseline_assignment.empty:
+        return {}
+
+    base = baseline_assignment.copy()
+    if nodes is not None and not nodes.empty and "pop_bracket" in nodes.columns:
+        node_lookup = (
+            nodes[["node_id", "pop_bracket"]]
+            .drop_duplicates(subset=["node_id"])
+            .set_index("node_id")["pop_bracket"]
+        )
+        base["pop_bracket"] = base["node_id"].map(node_lookup)
+    else:
+        base["pop_bracket"] = np.nan
+
+    base["annual_units"] = base["reachable_units"].fillna(0.0)
+    base["road_km"] = base["drive_time_hr"].fillna(0.0) * DRIVE_SPEED_KMH / max(DETOUR_FACTOR, 1e-9)
+    base["truckloads"] = np.ceil(base["annual_units"] / max(UNITS_PER_PALLET_NONPI, 1))
+    base["middle_mile_cost_eur"] = base["road_km"] * TRUCK_M_EUR_KM * base["truckloads"]
+    base["lastmile_unit_cost_eur"] = base.apply(
+        lambda row: _lastmile_cost_per_unit(
+            row.get("node_type", ""),
+            row.get("pop_bracket", np.nan),
+            float(row.get("last_mile_hours_final", row.get("last_mile_hours", 0.0)) or 0.0),
+        ),
+        axis=1,
+    )
+    base["lastmile_cost_eur"] = base["lastmile_unit_cost_eur"] * base["annual_units"]
+
+    annual_units_by_dc = base.groupby("assigned_cand")["annual_units"].sum().to_dict()
+    ocean_cost_eur = sum(
+        np.ceil(units / max(UNITS_PER_TEU_NONPI, 1)) * OCEAN_CONTAINER_EUR
+        for units in annual_units_by_dc.values()
+    )
+    dc_cost_df = _estimate_dc_operating_costs(annual_units_by_dc, units_per_pallet=UNITS_PER_PALLET_NONPI)
+
+    total_units = float(base["annual_units"].sum())
+    middle_mile_cost = float(base["middle_mile_cost_eur"].sum())
+    lastmile_cost = float(base["lastmile_cost_eur"].sum())
+    packaging_cost = total_units * NON_PI_PACK_COST_EUR
+    dc_cost = float(dc_cost_df["dc_total_cost_eur"].sum()) if not dc_cost_df.empty else 0.0
+    total_transport = middle_mile_cost + ocean_cost_eur
+
+    return {
+        "annual_nonpi_units": total_units,
+        "nonpi_middle_mile_cost_eur": middle_mile_cost,
+        "nonpi_ocean_cost_eur": ocean_cost_eur,
+        "nonpi_transport_eur": total_transport,
+        "nonpi_lastmile_cost_eur": lastmile_cost,
+        "nonpi_pack_cost_eur": packaging_cost,
+        "nonpi_dc_cost_eur": dc_cost,
+        "nonpi_total_cost_eur": total_transport + lastmile_cost + packaging_cost + dc_cost,
+    }
+
+
+def _allocate_lane_flows(
+    lanes: pd.DataFrame,
+    routes: pd.DataFrame,
+    service_matrix: pd.DataFrame,
+    annual_units_by_dc: dict[str, float],
+) -> dict[str, float]:
+    lane_flow: dict[str, float] = {}
+    if not service_matrix.empty and not routes.empty:
+        units_col = _service_units_column(service_matrix)
+        route_flow = (
+            service_matrix.dropna(subset=["route_id"])
+            .groupby("route_id")[units_col]
+            .sum()
+        )
+        route_lookup = routes.set_index("route_id")["path_lane_ids"].to_dict()
+        for route_id, flow_units in route_flow.items():
+            lane_ids = str(route_lookup.get(route_id, "")).split("|")
+            for lane_id in lane_ids:
+                if lane_id:
+                    lane_flow[lane_id] = lane_flow.get(lane_id, 0.0) + float(flow_units)
+
+    for dc_id, annual_units in annual_units_by_dc.items():
+        port_lane = f"PORT_NL_rotterdam__{dc_id}"
+        if port_lane in set(lanes["lane_id"]):
+            lane_flow[port_lane] = lane_flow.get(port_lane, 0.0) + float(annual_units)
+
+    return lane_flow
+
+
 def eval_59_lane_cost_carbon(
     lanes: pd.DataFrame,
+    routes: pd.DataFrame,
+    service_matrix: pd.DataFrame,
     annual_units_by_dc: dict[str, float],
     year: int,
 ) -> pd.DataFrame:
     """
-    Task 5.9: For each lane, compute annualised transport cost and CO₂ emissions.
-
-    Annual flow per lane is estimated as:
-      flow_units = annual_units_DC / (n_lanes_from_DC)   (uniform split)
-
-    Returns per-lane DataFrame:
-      lane_id, lane_type, truck_class, road_km, drive_time_hr,
-      annual_flow_units, transport_cost_eur, co2_kg
-    Plus aggregate: total cost, total CO2, avg cost per unit, CO2 per unit.
+    Task 5.9: Cost the actual routed PI flows instead of splitting each DC's
+    annual demand uniformly across all outbound lanes.
     """
     if lanes.empty:
         return pd.DataFrame()
 
-    # Outbound lane count per DC
-    outbound_counts = lanes.groupby("origin_id")["lane_id"].count().to_dict()
-
     df = lanes.copy()
-    df["annual_units_DC"] = df["origin_id"].map(annual_units_by_dc).fillna(0)
-    df["n_outbound"]      = df["origin_id"].map(outbound_counts).fillna(1)
-    df["annual_flow"]     = (df["annual_units_DC"] / df["n_outbound"].clip(lower=1)).round(0)
+    lane_flow = _allocate_lane_flows(lanes, routes, service_matrix, annual_units_by_dc)
+    df["annual_flow"] = df["lane_id"].map(lane_flow).fillna(0.0)
+    df = df[df["annual_flow"] > 0].copy()
+    if df.empty:
+        return pd.DataFrame()
 
-    # Cost per lane per year
     cost_per_km_map = {"L": TRUCK_L_EUR_KM, "M": TRUCK_M_EUR_KM, "S": TRUCK_S_EUR_KM}
     df["cost_per_km"] = df["truck_class"].map(cost_per_km_map).fillna(TRUCK_L_EUR_KM)
-    df["transport_cost_eur"] = (df["road_km"] * df["cost_per_km"] *
-                                 np.ceil(df["annual_flow"] / UNITS_PER_PALLET_PI)).round(2)
+    df["truckloads"] = np.ceil(df["annual_flow"] / max(UNITS_PER_PALLET_PI, 1))
+    df["transport_cost_eur"] = (
+        df["road_km"] * df["cost_per_km"] * df["truckloads"]
+    ).round(2)
 
-    # CO₂ per lane per year (kg)
     co2_map = {"L": CO2_TRUCK_L_KG_KM, "M": CO2_TRUCK_M_KG_KM, "S": CO2_TRUCK_S_KG_KM}
     df["co2_kg_per_km"] = df["truck_class"].map(co2_map).fillna(CO2_TRUCK_L_KG_KM)
-    df["co2_kg"] = (df["road_km"] * df["co2_kg_per_km"] *
-                    np.ceil(df["annual_flow"] / UNITS_PER_PALLET_PI)).round(1)
+    df["co2_kg"] = (df["road_km"] * df["co2_kg_per_km"] * df["truckloads"]).round(1)
 
-    # Ocean leg CO₂ (PORT → DC lanes)
     ocean_mask = df["lane_type"] == "PORT_DC"
     if ocean_mask.any():
-        teus = np.ceil(
-            df.loc[ocean_mask, "annual_flow"] / UNITS_PER_TEU_PI
-        )
+        teus = np.ceil(df.loc[ocean_mask, "annual_flow"] / max(UNITS_PER_TEU_PI, 1))
         df.loc[ocean_mask, "co2_kg"] = (
             OCEAN_SAVANNAH_ROTTERDAM_KM * CO2_OCEAN_KG_KM_TEU * teus
         ).round(1)
@@ -544,7 +714,7 @@ def eval_59_lane_cost_carbon(
     return df[[
         "year", "lane_id", "lane_type", "truck_class",
         "road_km", "drive_time_hr", "relay_flag",
-        "annual_flow", "transport_cost_eur", "co2_kg",
+        "annual_flow", "truckloads", "transport_cost_eur", "co2_kg",
     ]]
 
 
@@ -570,70 +740,77 @@ def summarise_cost_carbon(lane_cost_df: pd.DataFrame) -> dict:
 # ============================================================================
 
 def eval_510_dc_capacity_sizing(
-    annual_units_by_dc: dict[str, float],
+    dc_daily_sim: pd.DataFrame,
     n_sim: int = DEFAULT_N_SIM,
     seed: int = RANDOM_SEED,
 ) -> pd.DataFrame:
     """
-    Task 5.10: Size DC capacity from annual demand using Monte Carlo simulation.
-
-    Cyber week drives the constraint: 15% of annual demand over 5 days = 3%/day.
-    Simulate demand volatility around this peak to get P95 daily pallet throughput.
-
-    Pattern: numpy-first — draw daily demand samples, compute pallet needs.
-
-    Returns per-DC DataFrame:
-      dc_id, annual_units, peak_daily_units, p95_daily_pallets,
-      throughput_cap_pallets, storage_positions, DC costs.
+    Task 5.10: Size DC capacity from simulator-backed daily demand instead of
+    annual shortcuts.
     """
-    rng = np.random.default_rng(seed)
+    daily = extract_dc_daily_totals(dc_daily_sim)
+    if daily.empty:
+        return pd.DataFrame()
+
+    annual = (
+        daily.groupby(["sim", "dc_id"], as_index=False)["daily_units"]
+        .sum()
+        .rename(columns={"daily_units": "annual_units"})
+    )
+    peak = (
+        daily.groupby(["sim", "dc_id"], as_index=False)["daily_units"]
+        .max()
+        .rename(columns={"daily_units": "peak_daily_units"})
+    )
+    merged = annual.merge(peak, on=["sim", "dc_id"], how="left")
+
     records = []
+    for dc_id, grp in merged.groupby("dc_id"):
+        annual_samples = grp["annual_units"].to_numpy(dtype=float)
+        peak_samples = grp["peak_daily_units"].to_numpy(dtype=float)
 
-    for dc_id, annual_units in annual_units_by_dc.items():
-        # Cyber week daily demand: Normal(mean=3%, sigma=0.5%)
-        mean_peak = annual_units * PEAK_DAILY_SHARE
-        sigma_peak = mean_peak * 0.15   # 15% CV on peak day
+        annual_units = float(annual_samples.mean())
+        p50_units = float(np.percentile(peak_samples, 50))
+        p95_units = float(np.percentile(peak_samples, 95))
+        p99_units = float(np.percentile(peak_samples, 99))
 
-        # (n_sim,) daily demand samples during cyber week
-        peak_samples = rng.normal(mean_peak, sigma_peak, size=n_sim)
-        peak_samples = np.maximum(peak_samples, mean_peak * 0.5)  # floor
+        p95_pallets = int(np.ceil(p95_units / max(UNITS_PER_PALLET_PI, 1)))
+        throughput_cap = p95_pallets * 2
+        storage_positions = int(
+            np.ceil(np.percentile(annual_samples, 95) / 365.0 * 14.0 / max(UNITS_PER_PALLET_PI, 1))
+        )
 
-        p50_units  = float(np.percentile(peak_samples, 50))
-        p95_units  = float(np.percentile(peak_samples, 95))
-        p99_units  = float(np.percentile(peak_samples, 99))
-
-        p95_pallets = int(np.ceil(p95_units / UNITS_PER_PALLET_PI))
-        throughput_cap = p95_pallets * 2   # inbound + outbound
-
-        # Storage: cover 2 weeks of annual flow at average daily rate
-        avg_daily = annual_units / 365
-        storage_days = 14
-        storage_positions = int(np.ceil(avg_daily * storage_days / UNITS_PER_PALLET_PI))
-
-        # Annual DC costs (€)
-        storage_cost    = storage_positions * DC_STORAGE_EUR
+        storage_cost = storage_positions * DC_STORAGE_EUR
         throughput_cost = throughput_cap * DC_THROUGHPUT_EUR
-        inbound_cost    = int(annual_units / UNITS_PER_PALLET_PI) * DC_INBOUND_PALLET_EUR
-        outbound_cost   = int(annual_units / UNITS_PER_PALLET_PI) * DC_OUTBOUND_PALLET_EUR
-        pick_cost       = annual_units * DC_UNIT_PICK_EUR
-        dc_total_cost   = (DC_FIXED_EUR_YEAR + storage_cost + throughput_cost
-                           + inbound_cost + outbound_cost + pick_cost)
+        inbound_cost = int(np.ceil(annual_units / max(UNITS_PER_PALLET_PI, 1))) * DC_INBOUND_PALLET_EUR
+        outbound_cost = int(np.ceil(annual_units / max(UNITS_PER_PALLET_PI, 1))) * DC_OUTBOUND_PALLET_EUR
+        pick_cost = annual_units * DC_UNIT_PICK_EUR
+        dc_total_cost = (
+            DC_FIXED_EUR_YEAR
+            + storage_cost
+            + throughput_cost
+            + inbound_cost
+            + outbound_cost
+            + pick_cost
+        )
 
-        records.append({
-            "dc_id":                dc_id,
-            "annual_units":         round(annual_units, 0),
-            "mean_peak_daily_units":round(mean_peak, 0),
-            "p50_peak_daily_units": round(p50_units, 0),
-            "p95_peak_daily_units": round(p95_units, 0),
-            "p99_peak_daily_units": round(p99_units, 0),
-            "throughput_cap_pallets": throughput_cap,
-            "storage_positions":    storage_positions,
-            "dc_fixed_cost_eur":    DC_FIXED_EUR_YEAR,
-            "dc_storage_cost_eur":  round(storage_cost, 0),
-            "dc_throughput_cost_eur": round(throughput_cost, 0),
-            "dc_pick_cost_eur":     round(pick_cost, 0),
-            "dc_total_cost_eur":    round(dc_total_cost, 0),
-        })
+        records.append(
+            {
+                "dc_id": dc_id,
+                "annual_units": round(annual_units, 0),
+                "mean_peak_daily_units": round(float(peak_samples.mean()), 0),
+                "p50_peak_daily_units": round(p50_units, 0),
+                "p95_peak_daily_units": round(p95_units, 0),
+                "p99_peak_daily_units": round(p99_units, 0),
+                "throughput_cap_pallets": throughput_cap,
+                "storage_positions": storage_positions,
+                "dc_fixed_cost_eur": DC_FIXED_EUR_YEAR,
+                "dc_storage_cost_eur": round(storage_cost, 0),
+                "dc_throughput_cost_eur": round(throughput_cost, 0),
+                "dc_pick_cost_eur": round(pick_cost, 0),
+                "dc_total_cost_eur": round(dc_total_cost, 0),
+            }
+        )
 
     return pd.DataFrame(records)
 
@@ -664,69 +841,61 @@ def eval_511_transload_cost(annual_units: float, n_transload_centers: int = 2) -
 def eval_512_profitability(
     year: int,
     annual_pi_units: float,
-    annual_nonpi_units: float,
     dc_cost_df: pd.DataFrame,
     lane_cost_df: pd.DataFrame,
-    pack_savings: dict,
     transload_dict: dict,
-    uplift_summary: dict,
+    service_matrix: pd.DataFrame | None = None,
 ) -> dict:
     """
-    Task 5.12: P&L summary comparing PI vs non-PI scenario for a given year.
-
-    Revenue uplift (more reachable units) + cost savings from PI vs
-    PI-specific costs (transload, hub relay/consolidation fees).
+    Task 5.12: PI-only profitability summary.
     """
-    # Revenue
-    pi_revenue    = annual_pi_units    * REVENUE_PER_UNIT_EUR
-    nonpi_revenue = annual_nonpi_units * REVENUE_PER_UNIT_EUR
-    revenue_uplift = pi_revenue - nonpi_revenue
+    pi_revenue = annual_pi_units * REVENUE_PER_UNIT_EUR
 
-    # DC operating costs (sum across all DCs)
     total_dc_cost = float(dc_cost_df["dc_total_cost_eur"].sum()) if not dc_cost_df.empty else 0
 
-    # Transport cost
     total_transport = float(lane_cost_df["transport_cost_eur"].sum()) if not lane_cost_df.empty else 0
 
-    # Packaging: PI saves (NON_PI - PI) per unit
-    pack_saving_total = pack_savings.get("pack_cost_saving_eur", 0)
-
-    # PI-specific fees
     transload_total = transload_dict.get("total_transload_cost_eur", 0)
-    hub_relay_total = annual_pi_units * HUB_RELAY_COST_EUR    # assume avg 1 relay hub
+    pi_pack_cost = annual_pi_units * PI_PACK_COST_EUR
 
-    # Approximate non-PI costs for comparison
-    nonpi_pack_cost    = annual_nonpi_units * NON_PI_PACK_COST_EUR
-    pi_pack_cost       = annual_pi_units    * PI_PACK_COST_EUR
-    pack_cost_delta    = nonpi_pack_cost - pi_pack_cost  # positive = PI cheaper
+    pi_lastmile_cost = estimate_service_lastmile_cost(service_matrix) if service_matrix is not None else 0.0
+    hub_relay_total = 0.0
+    hub_consol_total = 0.0
+    if service_matrix is not None and not service_matrix.empty:
+        units_col = _service_units_column(service_matrix)
+        hub_relay_total = float(
+            (service_matrix[units_col] * service_matrix["n_relay_hubs"] * HUB_RELAY_COST_EUR).sum()
+        )
+        hub_consol_total = float(
+            (service_matrix[units_col] * service_matrix["n_consol_hubs"] * HUB_CONSOL_COST_EUR).sum()
+        )
 
-    total_pi_cost   = total_dc_cost + total_transport + pi_pack_cost + transload_total + hub_relay_total
-    total_nonpi_cost_approx = (
-        total_dc_cost * 0.9 +      # non-PI has slightly lower DC cost (fewer hubs to serve)
-        total_transport * 1.2 +    # non-PI transport higher (less relay efficiency)
-        nonpi_pack_cost
+    total_pi_cost = (
+        total_dc_cost
+        + total_transport
+        + pi_pack_cost
+        + transload_total
+        + hub_relay_total
+        + hub_consol_total
+        + pi_lastmile_cost
     )
 
-    pi_margin         = pi_revenue - total_pi_cost
-    nonpi_margin      = nonpi_revenue - total_nonpi_cost_approx
-    margin_uplift     = pi_margin - nonpi_margin
+    pi_margin = pi_revenue - total_pi_cost
 
     return {
-        "year":                  year,
-        "pi_units":              round(annual_pi_units, 0),
-        "nonpi_units":           round(annual_nonpi_units, 0),
-        "pi_revenue_eur":        round(pi_revenue, 0),
-        "nonpi_revenue_eur":     round(nonpi_revenue, 0),
-        "revenue_uplift_eur":    round(revenue_uplift, 0),
-        "total_dc_cost_eur":     round(total_dc_cost, 0),
-        "total_transport_eur":   round(total_transport, 0),
-        "pi_pack_cost_eur":      round(pi_pack_cost, 0),
-        "transload_cost_eur":    round(transload_total, 0),
-        "hub_relay_cost_eur":    round(hub_relay_total, 0),
-        "total_pi_cost_eur":     round(total_pi_cost, 0),
-        "pi_margin_eur":         round(pi_margin, 0),
-        "nonpi_margin_approx_eur": round(nonpi_margin, 0),
-        "margin_uplift_eur":     round(margin_uplift, 0),
+        "year": year,
+        "pi_units": round(annual_pi_units, 0),
+        "pi_revenue_eur": round(pi_revenue, 0),
+        "total_dc_cost_eur": round(total_dc_cost, 0),
+        "total_transport_eur": round(total_transport, 0),
+        "pi_lastmile_cost_eur": round(pi_lastmile_cost, 0),
+        "pi_pack_cost_eur": round(pi_pack_cost, 0),
+        "transload_cost_eur": round(transload_total, 0),
+        "hub_relay_cost_eur": round(hub_relay_total, 0),
+        "hub_consol_cost_eur": round(hub_consol_total, 0),
+        "total_pi_cost_eur": round(total_pi_cost, 0),
+        "pi_margin_eur": round(pi_margin, 0),
+        "pi_margin_pct": round(pi_margin / max(pi_revenue, 1.0) * 100, 2),
     }
 
 
@@ -738,9 +907,9 @@ def compute_all_kpis(
     year: int,
     active_nodes: pd.DataFrame,
     lanes: pd.DataFrame,
-    baseline_assignment: pd.DataFrame | None = None,
-    annual_units_by_dc: dict[str, float] | None = None,
-    n_sim: int = DEFAULT_N_SIM,
+    routes: pd.DataFrame | None = None,
+    service_matrix: pd.DataFrame | None = None,
+    lane_cost_df: pd.DataFrame | None = None,
 ) -> dict:
     """
     Compute all Task 5 KPIs for a given year.
@@ -750,40 +919,40 @@ def compute_all_kpis(
 
     # ---- Node/lane counts ----
     kpis["n_nodes_total"] = len(active_nodes)
-    for nt in ["PORT", "DC", "PERI_URBAN_HUB", "BORDER_RELAY_HUB", "DEMAND_NONMETRO"]:
+    for nt in ["PORT", "DC", "PERI_URBAN_HUB", "RELAY_HUB", "BORDER_RELAY_HUB", "DEMAND_NONMETRO"]:
         kpis[f"n_{nt.lower()}"] = int((active_nodes["node_type"] == nt).sum())
     kpis["n_lanes_total"] = len(lanes)
 
     # ---- 5.1 topology ----
     kpis.update(compute_coverage(active_nodes, lanes))
-    kpis.update(compute_detour_summary(lanes))
+    kpis.update(compute_detour_summary(routes if routes is not None else lanes))
     kpis.update(compute_relay_readiness(lanes))
     kpis.update(compute_dc_dc_connectivity(active_nodes, lanes))
 
-    # ---- 5.3 OTD attainment (Monte Carlo) ----
-    if baseline_assignment is not None and not baseline_assignment.empty:
-        direct_lanes = lanes[lanes["lane_type"] == "DC_HUB_DIRECT"].copy()
-        if "road_km" not in direct_lanes.columns:
-            direct_lanes["road_km"] = direct_lanes["haversine_km"] * DETOUR_FACTOR
+    if routes is not None and not routes.empty:
         hub_brackets = active_nodes[active_nodes["node_type"] == "PERI_URBAN_HUB"][
             ["node_id", "pop_bracket"]
         ].copy()
-        direct_lanes = direct_lanes.rename(columns={"dest_id": "node_id"})
-        otd_sim = simulate_otd_attainment(direct_lanes, hub_brackets, n_sim=n_sim)
+        otd_sim = simulate_otd_attainment(
+            routes,
+            hub_brackets,
+        )
         if not otd_sim.empty:
             kpis["mean_otd_attainment"]  = round(float(otd_sim["attainment_rate"].mean()), 4)
             kpis["pct_hubs_above_90pct"] = round(float((otd_sim["attainment_rate"] >= 0.9).mean() * 100), 2)
-            kpis["mean_otd_saving_hr"]   = round(float(otd_sim["otd_saving_hr"].mean()), 3)
+            kpis["mean_route_elapsed_hr"] = round(float(otd_sim["p50_elapsed_hr"].mean()), 3)
 
     # ---- 5.6 autonomy ----
     aut = eval_56_autonomy(active_nodes, lanes, year)
     kpis["dual_role_hubs"]   = aut["dual_role_hubs"]
     kpis["dual_role_pct"]    = aut["dual_role_pct"]
 
-    # ---- 5.9 cost + carbon (requires demand) ----
-    if annual_units_by_dc:
-        lc = eval_59_lane_cost_carbon(lanes, annual_units_by_dc, year)
-        cc = summarise_cost_carbon(lc)
+    if service_matrix is not None and not service_matrix.empty:
+        kpis["mean_service_otd_hr"] = round(float(service_matrix["otd_hours"].mean()), 3)
+        kpis["route_backed_service_pct"] = round(float(service_matrix["route_backed"].mean() * 100), 2)
+
+    if lane_cost_df is not None and not lane_cost_df.empty:
+        cc = summarise_cost_carbon(lane_cost_df)
         kpis["total_transport_cost_eur"] = cc.get("total_transport_cost_eur")
         kpis["total_co2_kg"]             = cc.get("total_co2_kg")
         kpis["co2_per_unit_kg"]          = cc.get("co2_per_unit_kg")

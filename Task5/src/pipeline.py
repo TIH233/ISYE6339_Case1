@@ -18,12 +18,13 @@ import pandas as pd
 from pathlib import Path
 
 from .config import (
-    COUNTRY_OPEN_SCHEDULE, get_open_countries,
-    DEFAULT_N_SIM, RANDOM_SEED, DETOUR_FACTOR,
+    DEFAULT_N_SIM, RANDOM_SEED,
 )
-from .data_loader import load_assignment, load_nonmetro_sheet
 from .preprocess import run_preprocess
-from .hub_network import activate_hubs, derive_border_relay_hubs, generate_lanes
+from .hub_network import (
+    activate_hubs, generate_lanes,
+    derive_relay_hubs_by_driving_distance, build_routes
+)
 from .evaluator import (
     compute_all_kpis,
     eval_52_container_requirements,
@@ -45,43 +46,6 @@ DATA_DIR   = Path(__file__).resolve().parent.parent / "data"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 
 PIPELINE_YEARS = list(range(2027, 2035))
-
-
-# ---------------------------------------------------------------------------
-# Border relay hub builder
-# ---------------------------------------------------------------------------
-
-def _build_relay_hubs_for_year(
-    year: int,
-    nodes_base: pd.DataFrame,
-    nonmetro_df: pd.DataFrame,
-) -> pd.DataFrame:
-    all_relay_rows: list[pd.DataFrame] = []
-    seen_pairs: set[frozenset] = set()
-
-    for y in sorted(COUNTRY_OPEN_SCHEDULE.keys()):
-        if y > year:
-            break
-        open_countries_y = get_open_countries(y)
-        peri_urban_y = nodes_base[
-            (nodes_base["node_type"] == "PERI_URBAN_HUB")
-            & nodes_base["country"].isin(open_countries_y)
-        ]
-        relay_y = derive_border_relay_hubs(open_countries_y, nonmetro_df, peri_urban_y, y)
-        if relay_y.empty:
-            continue
-        new_rows = []
-        for _, row in relay_y.iterrows():
-            pair = frozenset(str(row["derived_from_pair"]).split("-"))
-            if pair not in seen_pairs:
-                seen_pairs.add(pair)
-                new_rows.append(row)
-        if new_rows:
-            all_relay_rows.append(pd.DataFrame(new_rows))
-
-    if not all_relay_rows:
-        return pd.DataFrame()
-    return pd.concat(all_relay_rows, ignore_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -114,15 +78,6 @@ def run_pipeline(
         if verbose:
             print(f"Loaded nodes_master ({len(nodes_base)} nodes)")
 
-    nonmetro_df = load_nonmetro_sheet()
-
-    try:
-        baseline_all = load_assignment()
-    except FileNotFoundError:
-        if verbose:
-            print("Warning: assignment CSV not found")
-        baseline_all = pd.DataFrame()
-
     # ------------------------------------------------------------------
     # Year loop
     # ------------------------------------------------------------------
@@ -132,20 +87,22 @@ def run_pipeline(
         if verbose:
             print(f"\n=== Year {year} ===")
 
-        # Build relay hubs
-        relay_hubs = _build_relay_hubs_for_year(year, nodes_base, nonmetro_df)
+        # First activate base nodes for this year
+        active = activate_hubs(nodes_base, year)
 
-        # Merge base + relay
+        # Derive relay hubs based on driving-distance constraints (HUB-1 fix)
+        relay_hubs = derive_relay_hubs_by_driving_distance(active, year)
+
+        # Add relay hubs to active set
         if not relay_hubs.empty:
-            relay_new = relay_hubs[~relay_hubs["node_id"].isin(nodes_base["node_id"])].copy()
-            for col in nodes_base.columns:
-                if col not in relay_new.columns:
-                    relay_new[col] = np.nan
-            all_nodes = pd.concat([nodes_base, relay_new[nodes_base.columns]], ignore_index=True)
-        else:
-            all_nodes = nodes_base.copy()
-
-        active = activate_hubs(all_nodes, year)
+            # Align columns with active nodes
+            for col in active.columns:
+                if col not in relay_hubs.columns:
+                    relay_hubs[col] = np.nan
+            # Only add relay hubs with new IDs
+            relay_new = relay_hubs[~relay_hubs["node_id"].isin(active["node_id"])].copy()
+            if not relay_new.empty:
+                active = pd.concat([active, relay_new[active.columns]], ignore_index=True)
         if verbose:
             print(f"  Nodes: {active['node_type'].value_counts().to_dict()}")
 
@@ -153,21 +110,28 @@ def run_pipeline(
         if verbose and not lanes.empty:
             print(f"  Lanes: {len(lanes)} ({lanes['lane_type'].value_counts().to_dict()})")
 
-        # PI demand pipeline
+        # Build routes from lanes (HUB-1 fix)
+        routes = build_routes(active, lanes, year) if not lanes.empty else pd.DataFrame()
+        if verbose and not routes.empty:
+            print(f"  Routes: {len(routes)} ({routes['service_mode'].value_counts().to_dict()})")
+
+        # PI demand pipeline (pass routes for network-aware service overlay)
         pi_demand = run_pi_demand_pipeline(
-            year, nodes_master=nodes_base, n_sim=n_sim, seed=seed
+            year, nodes=active, routes=routes, n_sim=n_sim, seed=seed
         )
+        dc_daily_sim = pi_demand.get("dc_daily_sim", pd.DataFrame())
         annual_by_dc: dict[str, float] = pi_demand.get("annual_by_dc", {})
+        service_matrix = pi_demand.get("service_matrix", pd.DataFrame())
         total_pi_units = float(sum(annual_by_dc.values())) if annual_by_dc else 0.0
 
         # DC capacity sizing + stress
         dc_capacity  = pd.DataFrame()
         cyber_stress = pd.DataFrame()
         dc_intervals = pd.DataFrame()
-        if annual_by_dc:
-            dc_capacity  = eval_510_dc_capacity_sizing(annual_by_dc, n_sim=n_sim, seed=seed)
-            cyber_stress = compute_cyber_week_stress(annual_by_dc)
-            dc_intervals = compute_dc_demand_intervals(annual_by_dc, n_sim=n_sim, seed=seed)
+        if not dc_daily_sim.empty:
+            dc_capacity  = eval_510_dc_capacity_sizing(dc_daily_sim, n_sim=n_sim, seed=seed)
+            cyber_stress = compute_cyber_week_stress(dc_daily_sim)
+            dc_intervals = compute_dc_demand_intervals(dc_daily_sim)
 
         # Container analysis (5.2)
         container_analysis = eval_52_container_requirements(total_pi_units)
@@ -175,21 +139,26 @@ def run_pipeline(
         # Lane cost + carbon (5.9)
         lane_cost_df = pd.DataFrame()
         if annual_by_dc and not lanes.empty:
-            lane_cost_df = eval_59_lane_cost_carbon(lanes, annual_by_dc, year)
+            lane_cost_df = eval_59_lane_cost_carbon(
+                lanes=lanes,
+                routes=routes,
+                service_matrix=service_matrix,
+                annual_units_by_dc=annual_by_dc,
+                year=year,
+            )
 
         # OTD Monte Carlo simulation (5.3)
         otd_sim_df    = pd.DataFrame()
         otd_by_bracket = pd.DataFrame()
-        if not lanes.empty:
-            direct_lanes = lanes[lanes["lane_type"] == "DC_HUB_DIRECT"].copy()
-            if "road_km" not in direct_lanes.columns:
-                direct_lanes["road_km"] = direct_lanes["haversine_km"] * DETOUR_FACTOR
-            direct_lanes = direct_lanes.rename(columns={"dest_id": "node_id"})
+        if not routes.empty:
             hub_brackets = active[active["node_type"] == "PERI_URBAN_HUB"][
                 ["node_id", "pop_bracket"]
             ].copy()
             otd_sim_df     = simulate_otd_attainment(
-                direct_lanes, hub_brackets, n_sim=n_sim, seed=seed
+                routes,
+                hub_brackets,
+                n_sim=n_sim,
+                seed=seed,
             )
             otd_by_bracket = summarise_otd_by_bracket(otd_sim_df)
             if verbose and not otd_by_bracket.empty:
@@ -210,25 +179,19 @@ def run_pipeline(
         # All KPIs
         kpis = compute_all_kpis(
             year, active, lanes,
-            baseline_assignment=baseline_all if not baseline_all.empty else None,
-            annual_units_by_dc=annual_by_dc if annual_by_dc else None,
-            n_sim=n_sim,
+            routes=routes,
+            service_matrix=service_matrix if not service_matrix.empty else None,
+            lane_cost_df=lane_cost_df if not lane_cost_df.empty else None,
         )
 
         # Profitability (5.12)
-        nonpi_units = float(
-            baseline_all.loc[baseline_all["year"] == year, "reachable_units"].sum()
-        ) if not baseline_all.empty else total_pi_units * 0.9
-
         profitability = eval_512_profitability(
             year=year,
             annual_pi_units=total_pi_units,
-            annual_nonpi_units=nonpi_units,
             dc_cost_df=dc_capacity,
             lane_cost_df=lane_cost_df,
-            pack_savings=container_analysis,
             transload_dict=transload,
-            uplift_summary=pi_demand.get("uplift_summary", {}),
+            service_matrix=service_matrix,
         )
 
         if verbose:
@@ -252,6 +215,7 @@ def run_pipeline(
             "active_nodes":        active,
             "relay_hubs":          relay_hubs,
             "lanes":               lanes,
+            "routes":              routes,  # HUB-1 fix: store routes for downstream use
             "kpis":                kpis,
             "pi_demand":           pi_demand,
             "dc_capacity":         dc_capacity,
@@ -272,7 +236,7 @@ def run_pipeline(
     # ------------------------------------------------------------------
     if verbose:
         print("\nWriting outputs...")
-    write_all_outputs(pipeline_results, baseline_all, OUTPUT_DIR)
+    write_all_outputs(pipeline_results, OUTPUT_DIR)
 
     for res in pipeline_results:
         yr = res["year"]
@@ -290,7 +254,10 @@ def run_pipeline(
     all_relays_list = [r["relay_hubs"] for r in pipeline_results if not r["relay_hubs"].empty]
     if all_relays_list:
         all_relays = pd.concat(all_relays_list, ignore_index=True)
-        all_relays = all_relays.drop_duplicates(subset=["node_id", "derived_from_pair"])
+        dedupe_cols = ["node_id"]
+        if "derived_from_pair" in all_relays.columns:
+            dedupe_cols.append("derived_from_pair")
+        all_relays = all_relays.drop_duplicates(subset=dedupe_cols)
         all_relays.to_csv(DATA_DIR / "border_relay_hubs.csv", index=False)
         if verbose:
             print(f"  Written border_relay_hubs.csv ({len(all_relays)} rows)")
@@ -311,12 +278,12 @@ def print_kpi_summary(pipeline_results: list[dict]) -> None:
             "Year":           k["year"],
             "DC":             k.get("n_dc", 0),
             "Hubs":           k.get("n_peri_urban_hub", 0),
-            "Relays":         k.get("n_border_relay_hub", 0),
+            "Relays":         k.get("n_relay_hub", 0) + k.get("n_border_relay_hub", 0),
             "Lanes":          k.get("n_lanes_total", 0),
             "Coverage%":      k.get("coverage_pct"),
             "Relay%":         k.get("relay_readiness_pct"),
             "OTD attn":       k.get("mean_otd_attainment"),
-            "OTD save hr":    k.get("mean_otd_saving_hr"),
+            "Route hr":       k.get("mean_route_elapsed_hr"),
             "CO2 kg/unit":    k.get("co2_per_unit_kg"),
             "Margin €M":      round(p.get("pi_margin_eur", 0) / 1e6, 2),
         })

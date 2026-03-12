@@ -7,6 +7,7 @@ Numpy-first for geometry: pandas-in → numpy-compute → pandas-out.
 
 from __future__ import annotations
 
+import heapq
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -81,7 +82,7 @@ def activate_hubs(nodes: pd.DataFrame, year: int) -> pd.DataFrame:
       - DC: active if first_open_year <= year
       - PERI_URBAN_HUB: active if node's country is in open countries for year
       - DEMAND_NONMETRO: active if country is open
-      - BORDER_RELAY_HUB: active if activation_year <= year (set externally)
+      - RELAY_HUB / BORDER_RELAY_HUB: active if first_open_year <= year
     """
     open_countries = set(get_open_countries(year))
 
@@ -93,7 +94,7 @@ def activate_hubs(nodes: pd.DataFrame, year: int) -> pd.DataFrame:
             & nodes["country"].isin(open_countries)
         )
         | (
-            (nodes["node_type"] == "BORDER_RELAY_HUB")
+            nodes["node_type"].isin(["RELAY_HUB", "BORDER_RELAY_HUB"])
             & (nodes["first_open_year"] <= year)
         )
     )
@@ -244,6 +245,7 @@ def _lane_row(
     truck_class: str,
     relay_flag: bool,
     year: int,
+    dest_node_type: str = None,  # NET-3 fix: use node type for dwell logic
     **extra,
 ) -> dict:
     hav = float(haversine_km(
@@ -251,11 +253,24 @@ def _lane_row(
         np.array([dest_lat]), np.array([dest_lng]),
     )[0])
     dt = float(drive_time_hr(np.array([hav]))[0])
-    dwell = HUB_CONSOL_DWELL_HR if "DC" in dest_id else HUB_RELAY_DWELL_HR
+
+    # NET-3 fix: Determine dwell by destination node type, not string matching
+    if dest_node_type in ["DC", "PERI_URBAN_HUB"]:
+        dwell = HUB_CONSOL_DWELL_HR  # Consolidation-capable hubs
+    elif dest_node_type in ["RELAY_HUB", "BORDER_RELAY_HUB"]:
+        dwell = HUB_RELAY_DWELL_HR   # Relay-only hubs
+    elif dest_node_type == "PORT":
+        dwell = HUB_CONSOL_DWELL_HR  # Ports act like consolidation hubs
+    else:
+        dwell = 0  # No dwell for demand nodes or unknown types
+
     el = dt + dwell
 
     cost_per_km = TRUCK_L_EUR_KM if truck_class == "L" else TRUCK_M_EUR_KM
-    road_km = hav * DETOUR_FACTOR
+
+    # NET-2 fix: Store haversine as road_km; detour is applied in time calc only
+    # This allows real detour ratio computation at route level
+    road_km = hav  # NOT multiplied by DETOUR_FACTOR
 
     row = {
         "lane_id": f"{origin_id}__{dest_id}",
@@ -265,8 +280,8 @@ def _lane_row(
         "truck_class": truck_class,
         "relay_flag": relay_flag,
         "haversine_km": round(hav, 2),
-        "road_km": round(road_km, 2),
-        "drive_time_hr": round(dt, 3),
+        "road_km": round(road_km, 2),  # NET-2 fix: no detour factor here
+        "drive_time_hr": round(dt, 3),  # Detour already in drive_time_hr
         "elapsed_hr": round(el, 3),
         "cost_per_km": cost_per_km,
         "activation_year": year,
@@ -292,7 +307,13 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
     ports   = by_type.get("PORT", pd.DataFrame())
     dcs     = by_type.get("DC", pd.DataFrame())
     hubs    = by_type.get("PERI_URBAN_HUB", pd.DataFrame())
-    relays  = by_type.get("BORDER_RELAY_HUB", pd.DataFrame())
+    relay_frames = [
+        frame for frame in [
+            by_type.get("BORDER_RELAY_HUB", pd.DataFrame()),
+            by_type.get("RELAY_HUB", pd.DataFrame()),
+        ] if not frame.empty
+    ]
+    relays = pd.concat(relay_frames, ignore_index=True) if relay_frames else pd.DataFrame()
     # DEMAND_NONMETRO are demand sinks only — no outgoing lanes generated here
 
     # ------------------------------------------------------------------
@@ -308,6 +329,7 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
                 truck_class="L",
                 relay_flag=False,
                 year=year,
+                dest_node_type="DC",  # NET-3 fix
             )
             lanes.append(row)
 
@@ -332,6 +354,7 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
                 truck_class="L",
                 relay_flag=rel_flag,
                 year=year,
+                dest_node_type="DC",  # NET-3 fix
             )
             row_rev = _lane_row(
                 dc_b["node_id"], dc_a["node_id"],
@@ -341,6 +364,7 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
                 truck_class="L",
                 relay_flag=rel_flag,
                 year=year,
+                dest_node_type="DC",  # NET-3 fix
             )
             lanes += [row_fwd, row_rev]
 
@@ -373,22 +397,7 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
                 truck_class="M",
                 relay_flag=False,
                 year=year,
-            )
-            lanes.append(row)
-
-        # Relay-needed lanes (4 < dt <= DC_HUB_RELAY_MAX_HR) — flag only, no new lane
-        relay_i, relay_j = np.where(
-            (dt_matrix > DC_HUB_DIRECT_MAX_HR) & (dt_matrix <= DC_HUB_RELAY_MAX_HR)
-        )
-        for i, j in zip(relay_i, relay_j):
-            row = _lane_row(
-                str(dc_arr[i, 0]), str(hub_arr[j, 0]),
-                float(dc_lats[i]), float(dc_lngs[i]),
-                float(hub_lats[j]), float(hub_lngs[j]),
-                lane_type="DC_HUB_VIA_RELAY",
-                truck_class="L",
-                relay_flag=True,
-                year=year,
+                dest_node_type="PERI_URBAN_HUB",  # NET-3 fix
             )
             lanes.append(row)
 
@@ -406,13 +415,12 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
                 np.full(len(rel_lngs), dc_row.lng),
                 rel_lats, rel_lngs,
             )
-            road_kms = hav_to_relays * DETOUR_FACTOR
-            det_ratio = road_kms / np.maximum(hav_to_relays, 1e-9)
-            eligible = np.where(
-                (hav_to_relays <= DC_TO_BORDER_RELAY_MAX_KM)
-                & (det_ratio <= DETOUR_RATIO_MAX)
-            )[0]
+            # NET-2 fix: Removed tautological detour check
+            # Detour is evaluated on full routes, not individual legs
+            eligible = np.where(hav_to_relays <= DC_TO_BORDER_RELAY_MAX_KM)[0]
             for j in eligible:
+                # NET-3 fix: Look up relay node type
+                relay_node_type = relays.iloc[j].get("node_type", "RELAY_HUB")
                 row = _lane_row(
                     dc_row.node_id, str(rel_arr[j, 0]),
                     dc_row.lat, dc_row.lng,
@@ -421,6 +429,7 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
                     truck_class="L",
                     relay_flag=True,
                     year=year,
+                    dest_node_type=relay_node_type,  # NET-3 fix
                 )
                 lanes.append(row)
 
@@ -451,6 +460,7 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
                 truck_class="M",
                 relay_flag=False,
                 year=year,
+                dest_node_type="PERI_URBAN_HUB",  # NET-3 fix
             )
             lanes.append(row)
 
@@ -467,13 +477,10 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
             hub_lats[:, None], hub_lngs[:, None],
             hub_lats[None, :], hub_lngs[None, :],
         )
+        # NET-2 fix: Removed tautological detour check
         # Upper triangle only (undirected, both directions added below)
-        road_hh = hav_hh * DETOUR_FACTOR
-        det_hh = road_hh / np.maximum(hav_hh, 1e-9)
-
         i_arr, j_arr = np.where(
             (hav_hh <= HUB_CORRIDOR_MAX_KM)
-            & (det_hh <= DETOUR_RATIO_MAX)
             & np.triu(np.ones((n, n), dtype=bool), k=1)
         )
         for i, j in zip(i_arr, j_arr):
@@ -486,6 +493,7 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
                     truck_class="M",
                     relay_flag=True,
                     year=year,
+                    dest_node_type="PERI_URBAN_HUB",  # NET-3 fix
                 )
                 lanes.append(row)
 
@@ -493,6 +501,318 @@ def generate_lanes(active_nodes: pd.DataFrame, year: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame(lanes)
-    # Compute detour_ratio for all lanes
-    df["detour_ratio"] = (df["road_km"] / np.maximum(df["haversine_km"], 1e-9)).round(3)
+    # NET-2 fix: Removed tautological detour_ratio calculation
+    # Detour ratio is now computed at route level in build_routes()
     return df
+
+# ===========================================================================
+# NEW FUNCTIONS: Approach A - Capability-based hub consolidation (HUB-1 fix)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Driving-distance-based relay hub placement (replaces border-midpoint logic)
+# ---------------------------------------------------------------------------
+
+def derive_relay_hubs_by_driving_distance(
+    active_nodes: pd.DataFrame,
+    year: int,
+) -> pd.DataFrame:
+    """
+    Place relay hubs based on actual driving time constraints (HUB-1 fix).
+    
+    Algorithm:
+      1. For each DC → destination pair:
+         IF drive_time > MAX_SINGLE_DRIVER_HR (11 hr):
+            → Place relay hub at mid-journey point (~5.5 hr from each end)
+      2. Cluster nearby relay candidates (within BORDER_RELAY_MERGE_KM)
+      3. Merge with existing peri-urban hubs if within merge distance
+    
+    Returns DataFrame with columns:
+      node_id, node_type, lat, lng, first_open_year, serves_route, is_merged, merged_with
+    """
+    dcs = active_nodes[active_nodes["node_type"] == "DC"].copy()
+    destinations = active_nodes[active_nodes["node_type"].isin(
+        ["PERI_URBAN_HUB", "DEMAND_NONMETRO"]
+    )].copy()
+    peri_urban_hubs = active_nodes[active_nodes["node_type"] == "PERI_URBAN_HUB"].copy()
+    
+    if dcs.empty or destinations.empty:
+        return pd.DataFrame()
+    
+    relay_candidates = []
+    
+    # Find all DC→dest pairs that exceed single-driver limit
+    for _, dc in dcs.iterrows():
+        for _, dest in destinations.iterrows():
+            dist_km = float(haversine_km(
+                np.array([dc["lat"]]), np.array([dc["lng"]]),
+                np.array([dest["lat"]]), np.array([dest["lng"]]),
+            )[0])
+            
+            drive_hr = dist_km * DETOUR_FACTOR / DRIVE_SPEED_KMH
+            
+            if drive_hr > MAX_SINGLE_DRIVER_HR:  # 11 hours
+                # Place relay at mid-journey
+                relay_lat = (dc["lat"] + dest["lat"]) / 2
+                relay_lng = (dc["lng"] + dest["lng"]) / 2
+                
+                relay_candidates.append({
+                    "lat": relay_lat,
+                    "lng": relay_lng,
+                    "serves_route": f"{dc['node_id']}__{dest['node_id']}",
+                    "drive_hr_segment": drive_hr / 2,
+                })
+    
+    if not relay_candidates:
+        return pd.DataFrame()
+    
+    # Cluster nearby candidates (avoid hub proliferation)
+    relay_hubs = []
+    used_candidates = set()
+    
+    for i, candidate in enumerate(relay_candidates):
+        if i in used_candidates:
+            continue
+        
+        # Find all candidates within clustering distance
+        cluster = [candidate]
+        for j, other in enumerate(relay_candidates):
+            if j <= i or j in used_candidates:
+                continue
+            
+            dist_km = float(haversine_km(
+                np.array([candidate["lat"]]), np.array([candidate["lng"]]),
+                np.array([other["lat"]]), np.array([other["lng"]]),
+            )[0])
+            
+            if dist_km <= BORDER_RELAY_MERGE_KM:
+                cluster.append(other)
+                used_candidates.add(j)
+        
+        # Compute cluster centroid
+        cluster_lat = np.mean([c["lat"] for c in cluster])
+        cluster_lng = np.mean([c["lng"] for c in cluster])
+        
+        # Check if we can reuse existing peri-urban hub
+        if not peri_urban_hubs.empty:
+            dists_to_hubs = haversine_km(
+                np.full(len(peri_urban_hubs), cluster_lat),
+                np.full(len(peri_urban_hubs), cluster_lng),
+                peri_urban_hubs["lat"].values,
+                peri_urban_hubs["lng"].values,
+            )
+            
+            nearest_idx = int(np.argmin(dists_to_hubs))
+            nearest_dist = dists_to_hubs[nearest_idx]
+            
+            if nearest_dist <= BORDER_RELAY_MERGE_KM:
+                # Reuse existing hub (dual-role)
+                nearest_hub = peri_urban_hubs.iloc[nearest_idx]
+                relay_hubs.append({
+                    "node_id": f"RELAY_{year}_{len(relay_hubs)}",  # New ID for relay role
+                    "node_type": "RELAY_HUB",
+                    "lat": nearest_hub["lat"],
+                    "lng": nearest_hub["lng"],
+                    "first_open_year": year,
+                    "serves_route": "; ".join([c["serves_route"] for c in cluster]),
+                    "is_merged": True,
+                    "merged_with": nearest_hub["node_id"],
+                })
+                continue
+        
+        # Create new standalone relay hub
+        relay_hubs.append({
+            "node_id": f"RELAY_{year}_{len(relay_hubs)}",
+            "node_type": "RELAY_HUB",
+            "lat": cluster_lat,
+            "lng": cluster_lng,
+            "first_open_year": year,
+            "serves_route": "; ".join([c["serves_route"] for c in cluster]),
+            "is_merged": False,
+            "merged_with": None,
+        })
+    
+    return pd.DataFrame(relay_hubs) if relay_hubs else pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# Hub capability tagging (HUB-1 fix)
+# ---------------------------------------------------------------------------
+
+def tag_hub_capabilities(hubs: pd.DataFrame, demand_volume: dict = None) -> pd.DataFrame:
+    """
+    Tag hubs with service capabilities (HUB-1 fix).
+    
+    Rules:
+    - DC: Always can consolidate and relay
+    - PERI_URBAN_HUB: Can consolidate (assumed metro hubs serve consolidation)
+    - RELAY_HUB: Relay-only (no consolidation)
+    
+    Input:
+      - hubs: DataFrame with node_id, node_type
+      - demand_volume: optional {node_id: annual_units} to refine consolidation capability
+    
+    Returns: hubs DataFrame with added columns is_consol_capable, is_relay_capable
+    """
+    hubs = hubs.copy()
+    
+    # Initialize capability flags
+    hubs["is_consol_capable"] = False
+    hubs["is_relay_capable"] = False
+    
+    # Tag by node type
+    hubs.loc[hubs["node_type"] == "DC", "is_consol_capable"] = True
+    hubs.loc[hubs["node_type"] == "DC", "is_relay_capable"] = True
+    
+    hubs.loc[hubs["node_type"] == "PERI_URBAN_HUB", "is_consol_capable"] = True
+    hubs.loc[hubs["node_type"] == "PERI_URBAN_HUB", "is_relay_capable"] = True
+    
+    hubs.loc[hubs["node_type"] == "RELAY_HUB", "is_consol_capable"] = False
+    hubs.loc[hubs["node_type"] == "RELAY_HUB", "is_relay_capable"] = True
+    hubs.loc[hubs["node_type"] == "BORDER_RELAY_HUB", "is_consol_capable"] = False
+    hubs.loc[hubs["node_type"] == "BORDER_RELAY_HUB", "is_relay_capable"] = True
+    
+    # Optional: refine based on demand volume threshold
+    if demand_volume:
+        for node_id, volume in demand_volume.items():
+            if volume < 50_000:  # Low-volume hubs: relay-only
+                hubs.loc[hubs["node_id"] == node_id, "is_consol_capable"] = False
+    
+    return hubs
+
+
+# ---------------------------------------------------------------------------
+# Route builder for multi-leg paths (NET-1 fix)
+# ---------------------------------------------------------------------------
+
+def build_routes(
+    nodes: pd.DataFrame,
+    lanes: pd.DataFrame,
+    year: int,
+) -> pd.DataFrame:
+    """
+    Build route table from physical lane legs (NET-1 fix).
+
+    Routes are shortest-elapsed-time DC -> PERI_URBAN_HUB paths over the active
+    lane graph. Pseudo-direct relay markers are excluded; only physical legs are
+    allowed in a route path.
+    """
+    if lanes.empty:
+        return pd.DataFrame()
+
+    node_lookup = nodes.set_index("node_id").to_dict("index")
+    dc_ids = nodes.loc[nodes["node_type"] == "DC", "node_id"].tolist()
+    dest_hubs = nodes.loc[nodes["node_type"] == "PERI_URBAN_HUB", "node_id"].tolist()
+    if not dc_ids or not dest_hubs:
+        return pd.DataFrame()
+
+    usable_lanes = lanes[~lanes["lane_type"].isin(["PORT_DC", "DC_HUB_VIA_RELAY"])].copy()
+    if usable_lanes.empty:
+        return pd.DataFrame()
+
+    hub_nodes = nodes[nodes["node_type"].isin(["DC", "PERI_URBAN_HUB", "RELAY_HUB", "BORDER_RELAY_HUB"])].copy()
+    hub_nodes = tag_hub_capabilities(hub_nodes)
+    hub_caps = hub_nodes.set_index("node_id")[["is_consol_capable", "is_relay_capable"]].to_dict("index")
+
+    adjacency: dict[str, list] = {}
+    lane_lookup: dict[str, object] = {}
+    for lane in usable_lanes.itertuples(index=False):
+        adjacency.setdefault(lane.origin_id, []).append(lane)
+        lane_lookup[str(lane.lane_id)] = lane
+
+    def classify_service_mode(path_lanes: list) -> str:
+        lane_types = [lane.lane_type for lane in path_lanes]
+        if lane_types == ["DC_HUB_DIRECT"]:
+            return "DIRECT"
+        if any(lane_type == "DC_DC" for lane_type in lane_types):
+            return "VIA_DC_TRANSFER"
+        if any(lane_type in {"DC_RELAY", "RELAY_HUB"} for lane_type in lane_types):
+            return "VIA_RELAY"
+        if any(lane_type == "HUB_CORRIDOR" for lane_type in lane_types):
+            return "VIA_HUB_CORRIDOR"
+        return "MULTI_STOP"
+
+    routes: list[dict] = []
+
+    for origin_dc in dc_ids:
+        dist: dict[str, float] = {origin_dc: 0.0}
+        prev: dict[str, tuple[str, object]] = {}
+        heap: list[tuple[float, str]] = [(0.0, origin_dc)]
+
+        while heap:
+            elapsed_val, node_id = heapq.heappop(heap)
+            if elapsed_val > dist.get(node_id, float("inf")):
+                continue
+            for lane in adjacency.get(node_id, []):
+                next_elapsed = elapsed_val + float(lane.elapsed_hr)
+                if next_elapsed < dist.get(lane.dest_id, float("inf")):
+                    dist[lane.dest_id] = next_elapsed
+                    prev[lane.dest_id] = (node_id, lane)
+                    heapq.heappush(heap, (next_elapsed, lane.dest_id))
+
+        for dest_hub in dest_hubs:
+            if dest_hub not in dist:
+                continue
+
+            path_lanes: list = []
+            path_nodes = [dest_hub]
+            cursor = dest_hub
+            while cursor in prev:
+                parent, lane = prev[cursor]
+                path_lanes.append(lane)
+                path_nodes.append(parent)
+                cursor = parent
+            path_lanes.reverse()
+            path_nodes.reverse()
+            if not path_lanes:
+                continue
+
+            total_distance = float(sum(float(lane.road_km) for lane in path_lanes))
+            total_drive = float(sum(float(lane.drive_time_hr) for lane in path_lanes))
+            total_elapsed = float(sum(float(lane.elapsed_hr) for lane in path_lanes))
+            total_hub_dwell = max(total_elapsed - total_drive, 0.0)
+
+            n_relay = 0
+            n_consol = 0
+            for stop_id in path_nodes[1:]:
+                cap = hub_caps.get(stop_id, {})
+                if cap.get("is_relay_capable") and not cap.get("is_consol_capable"):
+                    n_relay += 1
+                elif cap.get("is_consol_capable"):
+                    n_consol += 1
+
+            origin_node = node_lookup[origin_dc]
+            dest_node = node_lookup[dest_hub]
+            direct_distance = float(haversine_km(
+                np.array([origin_node["lat"]]), np.array([origin_node["lng"]]),
+                np.array([dest_node["lat"]]), np.array([dest_node["lng"]]),
+            )[0])
+            detour = total_distance / max(direct_distance, 1e-9)
+            if detour > DETOUR_RATIO_MAX:
+                continue
+
+            routes.append({
+                "route_id": f"{origin_dc}__{dest_hub}__{classify_service_mode(path_lanes)}",
+                "origin_dc": origin_dc,
+                "dest_hub": dest_hub,
+                "service_mode": classify_service_mode(path_lanes),
+                "n_relay_stops": n_relay,
+                "n_consol_stops": n_consol,
+                "total_distance_km": round(total_distance, 3),
+                "total_drive_hr": round(total_drive, 3),
+                "total_hub_dwell_hr": round(total_hub_dwell, 3),
+                "total_elapsed_hr": round(total_elapsed, 3),
+                "detour_ratio": round(detour, 3),
+                "path_lane_ids": "|".join(str(lane.lane_id) for lane in path_lanes),
+                "path_node_ids": "|".join(str(node_id) for node_id in path_nodes),
+                "year": year,
+            })
+
+    if not routes:
+        return pd.DataFrame()
+    return (
+        pd.DataFrame(routes)
+        .sort_values(["origin_dc", "dest_hub", "total_elapsed_hr", "detour_ratio"])
+        .drop_duplicates(["origin_dc", "dest_hub"], keep="first")
+        .reset_index(drop=True)
+    )

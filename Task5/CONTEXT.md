@@ -1,280 +1,207 @@
 # CONTEXT.md
 
-Last updated: 2026-03-11 (revised after full planning conversation)
+Last updated: 2026-03-12
+Status: 4th Edition - PI-only data flow repaired end-to-end. Demand, routing, flow, cost, and profitability now run without non-PI comparison outputs.
 
 ## 1) Purpose
 
-This file is the working context for Task 5 planning, especially Task 5.1 (Hyperconnected Network Design), built from:
-
-- `.claude/CLAUDE.md`
-- `.claude/CLAUDE_Jupyter.md`
-- `.claude/CLAUDE_PDF.md`
-- `ISYE 6339 - BotWorld Export-to-Europe Supply Chain Casework 1-1 2026.pdf`
-- Existing project artifacts in `Task2/`, `Task3/`, `Task4/`
-
-## 2) Source-of-Truth Rules for This Repo
-
-- Use `.claude/*.md` as working protocol.
-- Do not read raw `.ipynb`/`.pdf` directly; use extraction methods.
-- Prefer reusing existing simulator modules and data contracts before adding new logic.
-- Treat this sequence as canonical data lineage for non-PI baseline:
-  - `Task2` demand + OTD simulation
-  - `Task3` production/autonomy estimation
-  - `Task4` DC-level realized demand
-
-## 3) Key Case Requirements Relevant to Task 5.1
-
-From the case PDF (Task 5: Hyperconnected Transportation, pp. 11-13):
-
-- Design an open hub and roadway network for:
-  - Rotterdam port -> Euro DCs
-  - Euro DC <-> Euro DC
-  - Euro DCs -> hubs near metros and country boundaries
-- Network goals:
-  - Relay transportation
-  - Daily shipments without full truckload constraints
-  - Consolidation with other shippers
-  - Fast O-D travel with limited detour
-- Provide yearly roadmap (2027-2034), not full fine-grained continental network.
-- Explain design rationale and show if goals are met.
-
-Related PI assumptions to include in modeling:
-
-- PI packaging and handling format (p-packs, p-boxes, p-pods).
-- Hub dwell:
-  - 1 hour for relay-only
-  - 2 hours when consolidation is needed
-- Improved downstream OTD assumptions in PI scenario.
-- PI cost adders in Appendix B:
-  - p-pack usage cost replaces non-PI EUR15 packaging
-  - transload handling per visited center
-  - hub relay/consolidation cost per unit per hub visit
-
-## 4) Current Asset Map (What Exists)
-
-## 4.1 Task2 (baseline demand/OTD simulation)
-
-- Key notebook: `Task2/Simulator.ipynb`
-- Core output directory: `Task3/sim_batches/`
-- Important static inputs:
-  - `Task2/dc_open_plan.csv`
-  - `Task2/assignment_by_year_active.csv`
-  - `Task2/assignment_with_otd_prob_reachable.csv`
-  - `Task2/time_matrix.csv`
-  - `Task2/weights_by_year.csv`
-
-Main logic modules in `Task2/Simulator.ipynb`:
-
-- Calendar builder with cyber week tagging
-- Adoption-rate-by-scenario functions (`pes`, `mp`, `opt`)
-- OTD conversion function
-- Stochastic period-share and model-share generators
-- Batched Monte Carlo simulator (`run_otd_simulator`)
-- Batch flush and aggregation to Task3 artifacts
-
-## 4.2 Task3 (production/autonomy estimation and validation)
-
-- Main notebooks:
-  - `Task3/Production_est.ipynb` (Task 3.1)
-  - `Task3/Production_feasibility_simulator.ipynb` (Task 3.2 check)
-- Uses `Task3/sim_batches/batch_*.csv.gz` from Task2.
-- Produces:
-  - `Task3/cluster_production_rates.csv`
-  - `Task3/prior_start_days_corrected.csv`
-  - `Task3/annual_summary.csv.gz`
-  - `Task3/segment_summary.csv.gz`
-  - `Task3/simulated_demand.csv.gz`
-
-## 4.3 Task4 (DC-level realized demand)
-
-- Key notebook: `Task4/DC_Demand_Simulator.ipynb`
-- Current production outputs (actual):
-  - `Task4/dc_output/batch_*.parquet`
-  - `Task4/dc_output/dc_daily_demand.parquet`
-
-Task4 simulator differences vs Task2:
-
-- Reuses core stochastic demand logic from Task2.
-- Adds geography-preserving demand pathing and DC routing.
-- Uses pre-aggregated segment-to-DC weights to avoid city-level memory blow-up.
-- Writes final schema directly at DC-day-model granularity.
-
-## 5) Key Data Contracts (Observed in Files)
-
-Only major datasets needed for Task5.1 planning are listed here.
-
-| Dataset | Producer | Consumer | Grain | Key Columns |
-|---|---|---|---|---|
-| `Task2/dc_open_plan.csv` | Task2 network decision | Task4/Task5 planning | DC | `cand_id`, `country`, `city`, `first_open_year`, lat/lng |
-| `Task2/assignment_with_otd_prob_reachable.csv` | Task2 OTD/reachability | Task2/Task4/Task5 | node-year assignment | `year`, `node_id`, `assigned_cand`, `node_type`, `otd_days_promise`, `purchase_prob`, `reachable_units` |
-| `Task3/sim_batches/batch_00.csv.gz` (+ siblings) | Task2 simulator | Task3 | sim-date-model | `sim`, `date`, `model`, `sales_units` |
-| `Task3/annual_summary.csv.gz` | Task2 post-agg | Task3/Task5 costing | sim-year | `demand_units`, `sales_units`, `revenue`, `lost_units`, `conversion_pct` |
-| `Task3/segment_summary.csv.gz` | Task2 post-agg | Task3/Task5 calibration | sim-year-segment | `segment`, `otd_days`, `conversion_pct` |
-| `Task3/simulated_demand.csv.gz` | Task2 post-agg | Task3 | date-model stats | `mean`, `std`, `p05`, `p50`, `p95` |
-| `Task4/dc_output/dc_daily_demand.parquet` | Task4 simulator | Task5/Task6 | sim-date-dc-model | `sim`, `date`, `year`, `euro_dc_id`, `model`, `realized_units` |
-
-Observed scale snapshot:
-
-- `Task3/sim_batches/batch_00.csv.gz`: 292,200 rows
-- `Task3/annual_summary.csv.gz`: 800 rows
-- `Task3/segment_summary.csv.gz`: 1,600 rows
-- `Task3/simulated_demand.csv.gz`: 58,440 rows
-- `Task4/dc_output/dc_daily_demand.parquet`: 18,992,000 rows
-
-## 6) Data Flow (Current Non-PI Baseline)
-
-```
-Task2 inputs (DC plan, assignment, OTD, time matrix, populations/models)
-  -> Task2 Simulator.ipynb
-  -> Task3/sim_batches/batch_*.csv.gz  (sim-date-model sales)
-  -> Task3/annual_summary.csv.gz
-  -> Task3/segment_summary.csv.gz
-  -> Task3/simulated_demand.csv.gz
+This file is the working context for Task5 maintenance and correction.
+
+Scope:
+- keep the current `Task5/src/` module framework
+- treat the current Task5 implementation as partially incorrect
+- use `Task5/MISTAKE.md` as the indexed list of known bad designs and broken assumptions
+- modify Task5 by restoring the Task2/Task4 simulator contract first, then fixing downstream network / flow / reporting logic
+- keep the current run PI-only; do not produce non-PI comparison tables unless the scope changes again
+
+## 2) Source-of-Truth Order
+
+Use this order whenever artifacts disagree:
 
-Task3 notebooks consume sim_batches
-  -> production rates + prior-start estimates + feasibility checks
-
-Task4 notebook reuses Task2 logic + assignment geography
-  -> Task4/dc_output/dc_daily_demand.parquet (sim-date-DC-model realized demand)
-```
-
-## 7) What Is Transferable to Task 5
-
-Directly transferable modules:
-
-- Demand generation hierarchy and stochastic controls (Task2/Task4)
-- Adoption scenarios and calendar/cyber-week logic
-- Existing DC landscape and yearly open schedule from Task2
-- OTD conversion framework
-- Output grain conventions (sim/date/year/model, then DC add-on)
-
-Needs adaptation or extension for PI Task 5:
-
-- Containerization logic must move from non-PI pallet/box framing to PI p-pack/p-box/p-pod framing.
-- Transport network model must become explicit hub-and-lane graph with relay/consolidation dwell.
-- Costing must switch to PI Appendix-B rules.
-- Inter-DC transfer capability must be enabled.
-
-## 8) Conflict and Mismatch Policy
-
-- If workbook assumptions, old notebook constants, or markdown docs conflict with case requirements, the PDF is authoritative.
-- Keep a `data_issue_log.csv` in Task5 outputs whenever a mismatch is found.
-- For each mismatch, record:
-  - source artifact and field
-  - PDF reference section/page
-  - correction applied
-  - impact on outputs
-
-## 9) Task 5 Implementation Plan Summary
-
-> **Full implementation detail in `Task5/PLAN.md`.** This section is a compact reference only.
-
-## 9.1 Node Taxonomy
-
-| node_type | Count | Source | Role |
-|---|---|---|---|
-| `PORT` | 1 | Rotterdam split from metro sheet | Ocean freight entry; no demand |
-| `DC` | 4 | `dc_open_plan.csv` | Storage + consolidation; also local peri-urban hub |
-| `PERI_URBAN_HUB` | 272 | `Metro cities_location` sheet | PI delivery handoff; 4/2/1hr OTD by pop bracket; dual relay role if on corridor |
-| `BORDER_RELAY_HUB` | ~25–30 | Derived: midpoint of adjacent-country centroids | Transit relay at borders; non-metro service handoff |
-| `DEMAND_NONMETRO` | 28 | `non_metro_hub` sheet | Demand centroid only; NOT a transit hub |
-
-- All hubs assumed already existing in PI world (PDF p.12).
-- DC cities deduplicated from metro list (type=DC only).
-- Rotterdam: `PORT_NL_rotterdam` + retained in `PERI_URBAN_HUB` (pop 1.03M, 1M+ bracket).
-- Known data fixes: alias `ing`→`lng`, forward-fill `Countries`, log all in `data_issue_log.csv`.
-
-## 9.2 PI Demand Generation
-
-- Reuse Task2 stochastic pipeline exactly.
-- PI OTD rates collapse hours vs days → purchase probability near 100% all segments.
-- Sub-DC city split: `pop_city / sum(pop_country_metros)` weight (same as Task2 logic).
-- Non-metro residual → `DEMAND_NONMETRO` node for country.
-- DC assignment from `assignment_with_otd_prob_reachable.csv` (unchanged).
-- Output grain: `sim × date × year × dc_id × model → realized_units`.
-
-## 9.3 Hub Activation and Lane Generation
-
-**Hub activation:** Activate all peri-urban hubs in countries open per BotWorld roadmap. Border relay hubs derived algorithmically at country-pair midpoints; merge if within 80km of existing peri-urban hub.
-
-**Lane time formula:** `drive_time_hr = haversine_km × 1.2 / 100`; `elapsed_hr = drive_time + hub_dwell`
-
-**Lane types:**
-- `PORT→DC`: always; truck L
-- `DC↔DC`: all 6 pairs; relay_flag if >11hr drive; truck L
-- `DC→PERI_URBAN_HUB`: direct if ≤4hr; via border relay if 4–10hr; via DC-DC if >10hr; truck M/L
-- `DC→BORDER_RELAY`: within 1000km; detour_ratio ≤ 1.35; truck L
-- `BORDER_RELAY→PERI_URBAN`: within 300km; truck M
-- `HUB↔HUB corridor`: adjacent hubs ≤300km; detour_ratio ≤ 1.35; truck M
-
-## 9.4 NumPy-First Simulation
-
-- pandas: I/O, filtering, joins.
-- numpy: routing-time and KPI computation (integer indices, vectorized masking, `np.add.at`).
-- Pattern: pandas-in → numpy-compute → pandas-out.
-
-## 9.5 Year-by-Year Roadmap
-
-| Year | DCs | Peri-urban hubs | Border relay hubs | DC-DC lanes |
-| --- | --- | --- | --- | --- |
-| 2027 | Koeln | ~30 | ~5 | none |
-| 2028 | +Lodz | +60 | +10 | Koeln↔Lodz |
-| 2029 | +Madrid | +80 | +10 | +Madrid↔Koeln, Madrid↔Lodz |
-| 2030 | +Rome | +100 | +8 | full 6-lane mesh |
-| 2031–34 | all 4 | all 272 | ~28–30 | full mesh |
-
-Activation log: `(node_id, activation_year, coverage_gain_pct, drive_time_reduction_hr, detour_ratio)`
-
-## 9.6 DC-DC Flow and Cyber Week
-
-**Normal periods:** rolling-7-day stress trigger (demand > 1.3× median) → transfer ≤10% of excess to nearest DC with slack. Cap: 10% of any DC's annual throughput.
-
-**Cyber week (override):** All DCs stressed simultaneously (15% annual demand / 5 days). DC-DC transfers = 0. Each DC handles own demand. Demand > capacity → lost sales.
-
-**DC capacity sizing:** `peak_daily_pallets = annual_demand × 0.03 / UNITS_PER_PALLET`; throughput cost = `peak_daily_pallets × 2 × €25/year`.
-
-## 9.7 KPI Definitions
-
-| KPI | Target |
-| --- | --- |
-| Coverage % of OD pairs with feasible path | ≥ 95% per year |
-| Elapsed time vs non-PI baseline | Reduction demonstrated |
-| Detour ratio (routed/direct) | ≤ 1.35 |
-| Relay readiness (% lanes with relay flag) | ≥ 80% |
-| DC-DC relay path coverage | 100% by 2028 |
-
-## 9.8 Module Structure
-
-```text
-Task5/src/
-  config.py           all Appendix A/B constants + route parameters
-  data_loader.py      Task2-Task4 artifacts + Excel sheets + data fixes
-  preprocess.py       nodes_master build; Rotterdam split; data_issue_log.csv
-  demand_generator.py Task2 stochastic pipeline; PI OTD conversion
-  hub_network.py      hub activation; border relay derivation; all lane types
-  flow_model.py       DC-DC stress transfer; cyber week logic; DC capacity sizing
-  evaluator.py        KPI computation vs non-PI baseline
-  reporting.py        roadmap tables; activation log; map exports; profitability
-  pipeline.py         2027–2034 year loop orchestrator
-Task5/notebooks/
-  task5_runner.ipynb  calls pipeline.py; displays outputs
-```
-
-## 9.9 Validation Checklist
-
-1. Fixed seed → deterministic roadmap outputs.
-2. Demand conservation across aggregation levels.
-3. No orphan nodes (every demand node reachable via at least one path).
-4. Every result traceable to a PDF requirement (p.11-13).
-5. numpy kernel path benchmarked vs pandas-only.
-
-## 10) Deliverables for Task 5.1
-
-Required output bundle:
-
-1. Network design maps (2027-2034 roadmap, phased).
-2. Hub and lane master tables with activation years.
-3. KPI evidence table proving coverage, speed, detour, and relay/consolidation goals.
-4. Comparison table against non-PI baseline path times.
-5. Modular source code in `Task5/src/`.
-6. Runner notebook that calls module pipeline end-to-end.
+1. Case PDF and Appendix B assumptions
+2. Extracted logic from `Task2/Simulator.ipynb` and `Task4/DC_Demand_Simulator.ipynb`
+3. Stable data contracts from Task2 / Task4 produced artifacts
+4. This corrected `Task5/CONTEXT.md` and `Task5/PLAN.md`
+5. Current Task5 code only where it agrees with items 1-4
+
+Repo protocol:
+- Use `.claude/*.md` as workflow protocol.
+- Do not read raw `.ipynb` / `.pdf` directly when avoidable; use extraction methods.
+- Do not treat current Task5 outputs as authoritative if they were produced by broken logic.
+- Do not simplify daily / sim-level demand into annual node-level probability math.
+
+## 3) Canonical Non-PI Baseline Lineage
+
+The non-PI baseline lineage is:
+
+- `Task2`: demand + OTD simulator at aggregate demand level
+- `Task3`: production / autonomy analysis consuming Task2 simulation outputs
+- `Task4`: DC-level realized demand simulator reusing Task2 stochastic logic and adding DC routing
+
+Key implication for Task5:
+- the demand-side source contract to preserve is the Task4-style output grain
+- Task5 can adapt the simulator for PI assumptions, but it must not replace the simulator with a new annual shortcut
+- unlike Task4, Task5 cannot assume the old fixed direct `node -> assigned_cand` landscape is still valid once hub-mediated routing and consolidation are introduced
+
+## 4) Canonical Demand Contract for Task5
+
+`Task5/src/demand_generator.py` is supposed to be a Task4-style simulator adaptation.
+
+Required retained mechanics from Task2 / Task4:
+- calendar with cyber week tagging
+- adoption-rate-by-scenario functions
+- stochastic period-share generation
+- stochastic model-share generation
+- OTD conversion logic
+- daily allocation across the year
+- output at DC-day-model granularity
+
+Additional Task5 requirement:
+- the demand side must become network-aware at the service layer
+- yearly hub / lane design can change the effective `DC -> demand node` route, elapsed time, and therefore OTD-driven demand conversion
+- this means Task5 cannot rely on the old Task2 direct assignment table as the final PI service landscape
+
+Allowed PI modifications:
+- updated PI OTD / purchase-probability mapping
+- PI-specific downstream routing assumptions if needed
+- PI-specific demand uplift logic, but only inside the same simulator contract
+- hub-mediated service and consolidation effects, but implemented as a network/service overlay rather than as a replacement demand shortcut
+
+Required output grain:
+- `sim, date, year, euro_dc_id, model, realized_units`
+
+Required downstream rule:
+- all annual demand totals used by `flow_model.py`, `evaluator.py`, and `reporting.py` must be aggregated from simulated DC output, not from `assignment_with_otd_prob_reachable.csv` expected values alone
+
+Required network/service rule:
+- build a yearly network-aware service view before final OTD conversion and DC aggregation
+- service logic must allow `DC -> hub -> hub -> demand area` style routes where applicable
+- consolidation state must be explicit because it changes elapsed time and potentially the chosen service path
+- preserve prior-task data integrity by keeping the old OTD conversion contract / schema intact; network changes should alter route-time inputs, not invent an unrelated demand table
+- default to the same Task2 / Task4 OTD conversion table or function interface unless the case PDF explicitly forces a separate PI overlay
+
+Important correction:
+- current demand and downstream modules were repaired to follow this contract in the PI-only scope
+
+## 5) Important Existing Artifacts
+
+### 5.1 Task2
+
+Inputs / artifacts still relevant to Task5:
+- `Task2/dc_open_plan.csv`
+- `Task2/assignment_with_otd_prob_reachable.csv`
+- `Task2/time_matrix.csv`
+- `Task2/weights_by_year.csv`
+- extracted Task2 simulator logic from `Task2/Simulator.ipynb`
+
+### 5.2 Task3
+
+Useful reference outputs:
+- `Task3/annual_summary.csv.gz`
+- `Task3/segment_summary.csv.gz`
+- `Task3/simulated_demand.csv.gz`
+- production / autonomy notebooks for capacity-thinking reference only
+
+### 5.3 Task4
+
+Primary demand reference for Task5:
+- `Task4/dc_output/batch_*.parquet`
+- `Task4/dc_output/dc_daily_demand.parquet`
+- extracted Task4 simulator logic from `Task4/DC_Demand_Simulator.ipynb`
+
+Task4 facts that matter:
+- it reuses the Task2 stochastic kernel instead of inventing a new one
+- it routes demand to DCs without losing simulator grain
+- it is the closest functional template for `Task5/src/demand_generator.py`
+
+## 6) Current Task5 State Assessment (3rd Edition)
+
+The current Task5 framework is acceptable as a module layout. Core demand and network infrastructure fixes have been completed.
+
+### ✅ Fixed Issues (3rd Edition)
+- ✅ `DG-1`: Demand generator now follows Task2/Task4 simulator contract
+- ✅ `DG-2`: Beta Monte Carlo math corrected (removed)
+- ✅ `SIM-1`: Service overlay layer enables network-aware demand
+- ✅ `HUB-1`: Hub consolidation integrated; routes built and passed to demand generator
+- ✅ `NET-3`: Dwell logic uses node types, not string matching
+- ✅ `NET-2`: Detour ratio genuinely computed at route level (tautology eliminated)
+- ✅ `NET-4`: Merged relay hubs preserved (solved by HUB-1 new function)
+
+### ❌ Remaining High-Priority Issues
+- `NET-1`: OTD evaluation still uses direct lanes only (should use routes)
+- `FLOW-1`: Capacity logic uses synthetic distributions (should use `dc_daily_sim`)
+- `COST-1`: Cost based on equal lane splits (should use routed demand flows) - **CRITICAL**
+
+### ⚠️ Remaining Medium-Priority Issues
+- `REP-1`: Non-PI elapsed-time comparison fields missing in reporting
+- `FIN-1`: Non-PI cost baseline uses approximations instead of Task2/Task4 artifacts
+
+### Current Pipeline State
+- ✅ Demand: `dc_daily_sim` with proper grain (sim, date, year, euro_dc_id, model, realized_units)
+- ✅ Routes: Built from lanes with service_mode, n_relay_stops, n_consol_stops, detour_ratio
+- ✅ Network: Relay hubs placed by driving-distance constraints
+- ✅ Dwell: Correctly assigned by node type (consolidation vs relay)
+- ✅ Sanity check: Pipeline runs successfully for year 2027
+
+Use `Task5/MISTAKE.md` for detailed fix status and `Task5/FIX_SUMMARY.md` for implementation notes.
+
+## 7) Modification Boundaries
+
+Accepted boundary for current maintenance:
+- keep `preprocess.py`, `hub_network.py`, `flow_model.py`, `evaluator.py`, `reporting.py`, and `pipeline.py` as modules
+- fix internals before adding new features
+- do not redesign Task5 into a different folder architecture unless explicitly requested
+
+Correction order (updated 2026-03-11 PM):
+1. ✅ Restore the demand generator contract (DG-1, DG-2)
+2. ✅ Add yearly network-aware service layer (SIM-1)
+3. ✅ Reconnect downstream annual demand to simulated DC outputs (completed)
+4. ✅ Fix network path semantics, dwell logic, detour logic, and consolidation state (HUB-1, NET-2, NET-3, NET-4)
+5. ⏳ Fix OTD evaluation to use routes instead of direct lanes only (NET-1)
+6. ⏳ Fix DC transfer / capacity logic to use simulator-derived daily demand (FLOW-1)
+7. ⏳ Fix costing to use routed demand flows instead of equal lane splits (COST-1)
+8. ⏳ Fix non-PI comparison and profitability based on routed / baseline-backed metrics (REP-1, FIN-1)
+
+## 8) Data and Logging Conventions
+
+Target convention for modification work:
+- `Task5/data/` holds prepared reference tables such as `nodes_master.csv` and relay-node artifacts
+- `Task5/output/` holds run outputs, KPI tables, comparisons, and issue logs
+- `data_issue_log.csv` should be treated as an output artifact for task runs
+
+Important note:
+- the current code writes `data_issue_log.csv` under `Task5/data/`; this is a known mismatch and should be corrected when `preprocess.py` / reporting outputs are touched
+
+## 9) AI Editing Guidance
+
+Before editing Task5:
+1. read `Task5/MISTAKE.md`
+2. confirm whether the change affects the canonical demand contract
+3. if demand-related, compare against extracted Task2 / Task4 simulator logic before editing
+4. prefer preserving data grain over adding shortcuts
+5. if a planned change conflicts with the case PDF, the PDF wins
+
+When modifying `demand_generator.py`:
+- start from Task4-style logic, not from the current Task5 implementation
+- keep `run_pi_demand_pipeline()` as an orchestrator if useful, but change its internals to return simulator-derived results
+- do not use annual Beta or lognormal shortcuts as substitutes for the demand simulator
+- do not freeze the old direct DC assignment if the active PI network implies a different service path
+- if hub consolidation changes route time or service viability, feed that into the same OTD conversion contract before final demand aggregation
+
+Recommended structural pattern:
+1. stochastic demand kernel generates pre-OTD demand at node-compatible geography
+2. network modules generate a yearly service matrix from the active hub graph
+3. service matrix provides route choice, relay count, consolidation count, and elapsed time
+4. OTD conversion uses that service matrix while keeping the prior-task schema / logic family intact
+5. realized demand is then aggregated to DC outputs
+
+When modifying downstream modules:
+- assume current Task5 annual demand, OTD, cost, and comparison outputs may need recomputation after the demand fix
+- do not use old Task5 CSV outputs as regression baselines unless the underlying logic has been validated
+
+## 10) Companion Files
+
+Use these three files together:
+- `Task5/CONTEXT.md`: repo context and source-of-truth rules
+- `Task5/PLAN.md`: corrected modification plan for the current Task5 framework
+- `Task5/MISTAKE.md`: indexed list of known wrong parts, with references and fix direction

@@ -1,3 +1,3 @@
 year,step,from_id,to_id,lane_type,drive_hr,dwell_hr,cumulative_elapsed_hr,truck_class,road_km,co2_kg
-2027,1,PORT_NL_rotterdam,CAND_DE_koeln,PORT_DC,2.443,1.0,3.443,L,244.3,151.45
-2027,2,CAND_DE_koeln,METRO_BE_brussels,DC_HUB_DIRECT,2.192,1.0,6.635,M,219.2,89.88
+2027,1,PORT_NL_rotterdam,CAND_DE_koeln,PORT_DC,2.443,2.0,4.443,L,203.6,126.21
+2027,2,CAND_DE_koeln,METRO_BE_brussels,DC_HUB_DIRECT,2.192,2.0,8.635,M,182.7,74.89

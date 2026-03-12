@@ -1,0 +1,5 @@
+year,pi_realized_total,pi_revenue_eur,active_service_nodes,route_backed_nodes,route_backed_share_pct,mean_purchase_prob
+2027,27223.0,12348453.0,76,76,100.0,0.9786
+2028,65804.0,29848730.0,125,124,99.2,0.9692
+2029,138195.0,62685391.0,255,248,97.25,0.9652
+2030,206586.0,93707285.0,302,293,97.02,0.9654

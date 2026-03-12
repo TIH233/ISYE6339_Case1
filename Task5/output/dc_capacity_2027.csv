@@ -1,2 +1,2 @@
 dc_id,annual_units,mean_peak_daily_units,p50_peak_daily_units,p95_peak_daily_units,p99_peak_daily_units,throughput_cap_pallets,storage_positions,dc_fixed_cost_eur,dc_storage_cost_eur,dc_throughput_cost_eur,dc_pick_cost_eur,dc_total_cost_eur
-CAND_DE_koeln,28430.0,853.0,854.0,1060.0,1127.0,354,182,600000,20020,8850,85290.0,756802.0
+CAND_DE_koeln,27223.0,1178.0,1178.0,1178.0,1178.0,394,175,600000,19250,9850,81670.0,751612.0

@@ -1,6 +1,5 @@
 """
-reporting.py — Build and export roadmap tables, activation logs, KPI summaries,
-and non-PI comparison table for Task 5.1.
+reporting.py — Build and export PI-only Task5 output tables.
 """
 
 from __future__ import annotations
@@ -69,20 +68,24 @@ def build_activation_log(pipeline_results: list[dict]) -> pd.DataFrame:
 
         coverage_gain = kpis.get("coverage_pct", 0) - prev_kpis.get("coverage_pct", 0)
         time_red = (
-            prev_kpis.get("mean_time_saving_hr", 0)
-            - kpis.get("mean_time_saving_hr", 0)
-        ) if "mean_time_saving_hr" in kpis and "mean_time_saving_hr" in prev_kpis else 0
+            prev_kpis.get("mean_route_elapsed_hr", 0)
+            - kpis.get("mean_route_elapsed_hr", 0)
+        ) if "mean_route_elapsed_hr" in kpis and "mean_route_elapsed_hr" in prev_kpis else 0
 
         for nid in new_nodes:
             node_row = active[active["node_id"] == nid]
             node_type = node_row["node_type"].values[0] if not node_row.empty else "UNKNOWN"
 
-            # Best outbound lane detour ratio for this node
+            # NET-2 fix: Get detour ratio from routes instead of lanes
             best_det = np.nan
-            if not lanes.empty:
-                node_lanes = lanes[lanes["origin_id"] == nid]
-                if not node_lanes.empty:
-                    best_det = round(float(node_lanes["detour_ratio"].min()), 3)
+            routes_data = res.get("routes", pd.DataFrame())
+            if not routes_data.empty and "detour_ratio" in routes_data.columns:
+                if node_type == "DC":
+                    node_routes = routes_data[routes_data["origin_dc"] == nid]
+                else:
+                    node_routes = routes_data[routes_data["dest_hub"] == nid]
+                if not node_routes.empty:
+                    best_det = round(float(node_routes["detour_ratio"].min()), 3)
 
             records.append({
                 "node_id": nid,
@@ -113,58 +116,6 @@ def build_kpi_table(pipeline_results: list[dict]) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Non-PI comparison table
-# ---------------------------------------------------------------------------
-
-def build_nonpi_comparison(pipeline_results: list[dict], baseline: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compare PI network topology KPIs vs non-PI baseline.
-    Baseline: from assignment_with_otd_prob_reachable.csv.
-    Columns: year, metric, pi_value, nonpi_value, delta, delta_pct
-    """
-    rows: list[dict] = []
-
-    for res in sorted(pipeline_results, key=lambda r: r["year"]):
-        year = res["year"]
-        kpis = res["kpis"]
-        base_yr = baseline[baseline["year"] == year] if not baseline.empty else pd.DataFrame()
-
-        # Metric: mean travel elapsed hr
-        pi_elapsed = None
-        nonpi_elapsed = None
-
-        elapsed_comp = res.get("elapsed_comparison")
-        if elapsed_comp is not None and not elapsed_comp.empty:
-            pi_elapsed   = round(float(elapsed_comp["pi_otd_hr"].mean()), 3)
-            nonpi_elapsed = round(float(elapsed_comp["nonpi_otd_hr"].mean()), 3)
-        elif not base_yr.empty:
-            nonpi_elapsed = round(float(base_yr["travel_elapsed_hr"].mean()), 3)
-
-        for metric, pi_val, nonpi_val in [
-            ("coverage_pct",          kpis.get("coverage_pct"),      None),
-            ("relay_readiness_pct",   kpis.get("relay_readiness_pct"), None),
-            ("mean_travel_elapsed_hr", pi_elapsed,                    nonpi_elapsed),
-            ("mean_detour_ratio",     kpis.get("mean_detour"),        1.2),   # DETOUR_FACTOR as non-PI baseline
-        ]:
-            delta = None
-            delta_pct = None
-            if pi_val is not None and nonpi_val is not None:
-                delta = round(pi_val - nonpi_val, 3)
-                delta_pct = round(delta / nonpi_val * 100, 2) if nonpi_val != 0 else None
-
-            rows.append({
-                "year": year,
-                "metric": metric,
-                "pi_value": pi_val,
-                "nonpi_value": nonpi_val,
-                "delta": delta,
-                "delta_pct": delta_pct,
-            })
-
-    return pd.DataFrame(rows)
-
-
-# ---------------------------------------------------------------------------
 # Write all outputs
 # ---------------------------------------------------------------------------
 
@@ -181,7 +132,7 @@ def write_subtask_summaries(
     5.2  subtask_5_2_container_space.csv
     5.3  subtask_5_3_otd_attainment_by_bracket.csv  (+  otd_simulation_{year}.csv per year)
     5.4  subtask_5_4_joint_shipment_trace.csv
-    5.5  subtask_5_5_demand_uplift.csv
+    5.5  subtask_5_5_pi_demand_summary.csv
     5.6  subtask_5_6_autonomy.csv
     5.9  subtask_5_9_cost_carbon_summary.csv  (+  lane_cost_carbon_{year}.csv per year)
     5.10 subtask_5_10_dc_demand_intervals.csv  (+  dc_capacity_{year}.csv per year)
@@ -226,17 +177,20 @@ def write_subtask_summaries(
             print(f"  [5.4]  subtask_5_4_joint_shipment_trace.csv  (year={res['year']})")
             break
 
-    # --- 5.5  Demand uplift summary (all years) ---
+    # --- 5.5  PI demand summary (all years) ---
     rows_55 = []
     for res in sorted_results:
-        us = res.get("pi_demand", {}).get("uplift_summary", {})
+        us = res.get("pi_demand", {}).get("demand_summary", {})
         if us:
             rows_55.append(us)
     if rows_55:
         pd.DataFrame(rows_55).set_index("year").to_csv(
-            output_dir / "subtask_5_5_demand_uplift.csv"
+            output_dir / "subtask_5_5_pi_demand_summary.csv"
         )
-        print(f"  [5.5]  subtask_5_5_demand_uplift.csv")
+        stale_uplift = output_dir / "subtask_5_5_demand_uplift.csv"
+        if stale_uplift.exists():
+            stale_uplift.unlink()
+        print(f"  [5.5]  subtask_5_5_pi_demand_summary.csv")
 
     # --- 5.6  Autonomy & relay readiness (all years) ---
     rows_56 = [res["autonomy"] for res in sorted_results]
@@ -258,6 +212,7 @@ def write_subtask_summaries(
                 "total_co2_kg":        round(float(lc["co2_kg"].sum()), 0),
                 "total_road_km":       round(float(lc["road_km"].sum()), 0),
                 "total_flow_units":    round(float(total_flow), 0),
+                "total_truckloads":    round(float(lc["truckloads"].sum()), 0) if "truckloads" in lc.columns else None,
                 "cost_per_unit_eur":   round(float(lc["transport_cost_eur"].sum()) / max(float(total_flow), 1), 4),
                 "co2_per_unit_kg":     round(float(lc["co2_kg"].sum()) / max(float(total_flow), 1), 4),
             })
@@ -304,7 +259,6 @@ def write_subtask_summaries(
 
 def write_all_outputs(
     pipeline_results: list[dict],
-    baseline: pd.DataFrame,
     output_dir: Path = OUTPUT_DIR,
 ) -> None:
     """
@@ -341,10 +295,9 @@ def write_all_outputs(
     kpi_tbl.to_csv(output_dir / "network_kpis_by_year.csv", index=False)
     print(f"  Written network_kpis_by_year.csv ({len(kpi_tbl)} rows)")
 
-    # Non-PI comparison  [5.1]
-    comp_tbl = build_nonpi_comparison(pipeline_results, baseline)
-    comp_tbl.to_csv(output_dir / "network_vs_nonpi_comparison.csv", index=False)
-    print(f"  Written network_vs_nonpi_comparison.csv ({len(comp_tbl)} rows)")
+    stale_comp = output_dir / "network_vs_nonpi_comparison.csv"
+    if stale_comp.exists():
+        stale_comp.unlink()
 
     # Subtask summary files  [5.2–5.12]
     print("\nWriting subtask summary files...")
