@@ -5,11 +5,11 @@ Node taxonomy (PLAN.md §1):
   PORT          : 1   Rotterdam (split from metro sheet)
   DC            : 4   from dc_open_plan.csv
   PERI_URBAN_HUB: 272 metro sheet minus DC cities; Rotterdam kept as hub too
-  BORDER_RELAY_HUB: ~25-30  derived algorithmically in hub_network.py
+  RELAY_HUB     : derived algorithmically in hub_network.py
   DEMAND_NONMETRO : 28/29  non_metro_hub sheet
 
 This module handles data fixes and writes the base node table.
-Border relay hubs are added later by hub_network.py.
+Relay hubs are added later by hub_network.py.
 """
 
 from __future__ import annotations

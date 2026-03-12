@@ -34,7 +34,7 @@ This is not a greenfield plan. It is a correction plan.
 
 Read in this order:
 1. `Task5/CONTEXT.md`
-2. `Task5/MISTAKE.md`
+2. `Task5/ACTIVE_FIXES.md`
 3. extracted Task2 simulator logic from `Task2/Simulator.ipynb`
 4. extracted Task4 DC-demand simulator logic from `Task4/DC_Demand_Simulator.ipynb`
 5. only then edit Task5 source files
@@ -76,6 +76,12 @@ PI-specific changes belong here:
 - PI scenario uplift assumptions
 - PI-specific routing adjustments if they do not break output grain
 - hub-mediated consolidation / relay state if it is represented as a route-service overlay
+
+Current implementation rule:
+- use one PI OTD concept only: end-to-end service OTD
+- `OTD = route elapsed + relay/consolidation dwell + PI last mile`
+- feed that OTD directly into purchase-probability conversion
+- do not add a second attainment / promise-comparison layer in evaluator or notebook reporting
 
 ### 3.4 Explicit Do-Not-Do Rules
 
@@ -215,11 +221,11 @@ Expected maintained outputs:
 - `output/network_kpis_by_year.csv`
 - `output/network_vs_nonpi_comparison.csv`
 - `output/subtask_5_*.csv`
-- yearly supporting outputs such as `dc_capacity_{year}.csv`, `lane_cost_carbon_{year}.csv`, `otd_simulation_{year}.csv`
+- yearly supporting outputs such as `dc_capacity_{year}.csv`, `lane_cost_carbon_{year}.csv`, `otd_profile_{year}.csv`
 
 Expected supporting data artifacts:
 - `data/nodes_master.csv`
-- `data/border_relay_hubs.csv` if relay generation remains materialized
+- `data/relay_hubs.csv` if relay generation remains materialized
 
 Target logging artifact:
 - `output/data_issue_log.csv`
@@ -296,4 +302,4 @@ Keep orchestration responsibility; avoid embedding new business logic here.
 
 ## 11) Companion Reference
 
-Use `Task5/MISTAKE.md` as the fast index of what is currently wrong, where it lives, and what to inspect first.
+Use `Task5/ACTIVE_FIXES.md` as the fast index of what is currently wrong, where it lives, and what to inspect first.

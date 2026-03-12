@@ -130,7 +130,7 @@ def write_subtask_summaries(
     ----------------------
     5.1  network_kpis_by_year.csv, network_roadmap_{year}.csv, activation_decisions_log.csv
     5.2  subtask_5_2_container_space.csv
-    5.3  subtask_5_3_otd_attainment_by_bracket.csv  (+  otd_simulation_{year}.csv per year)
+    5.3  subtask_5_3_otd_profile_by_class.csv  (+  otd_profile_{year}.csv per year)
     5.4  subtask_5_4_joint_shipment_trace.csv
     5.5  subtask_5_5_pi_demand_summary.csv
     5.6  subtask_5_6_autonomy.csv
@@ -154,18 +154,21 @@ def write_subtask_summaries(
         )
         print(f"  [5.2]  subtask_5_2_container_space.csv")
 
-    # --- 5.3  OTD attainment by bracket (all years consolidated) ---
+    # --- 5.3  End-to-end OTD profile by service class (all years consolidated) ---
     rows_53 = []
     for res in sorted_results:
-        if not res["otd_by_bracket"].empty:
-            sub = res["otd_by_bracket"].copy()
+        if not res["otd_by_class"].empty:
+            sub = res["otd_by_class"].copy()
             sub.insert(0, "year", res["year"])
             rows_53.append(sub)
+    stale_53 = output_dir / "subtask_5_3_otd_attainment_by_bracket.csv"
+    if stale_53.exists():
+        stale_53.unlink()
     if rows_53:
         pd.concat(rows_53, ignore_index=True).to_csv(
-            output_dir / "subtask_5_3_otd_attainment_by_bracket.csv", index=False
+            output_dir / "subtask_5_3_otd_profile_by_class.csv", index=False
         )
-        print(f"  [5.3]  subtask_5_3_otd_attainment_by_bracket.csv")
+        print(f"  [5.3]  subtask_5_3_otd_profile_by_class.csv")
 
     # --- 5.4  Joint shipment illustrative trace (first available year) ---
     for res in sorted_results:

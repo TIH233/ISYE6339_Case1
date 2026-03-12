@@ -10,7 +10,7 @@ This file is the working context for Task5 maintenance and correction.
 Scope:
 - keep the current `Task5/src/` module framework
 - treat the current Task5 implementation as partially incorrect
-- use `Task5/MISTAKE.md` as the indexed list of known bad designs and broken assumptions
+- use `Task5/ACTIVE_FIXES.md` as the indexed list of confirmed open issues and fix specifications
 - modify Task5 by restoring the Task2/Task4 simulator contract first, then fixing downstream network / flow / reporting logic
 - keep the current run PI-only; do not produce non-PI comparison tables unless the scope changes again
 
@@ -66,6 +66,14 @@ Allowed PI modifications:
 - PI-specific downstream routing assumptions if needed
 - PI-specific demand uplift logic, but only inside the same simulator contract
 - hub-mediated service and consolidation effects, but implemented as a network/service overlay rather than as a replacement demand shortcut
+
+Current OTD interpretation rule:
+- use a single end-to-end PI OTD definition in Task5 demand and reporting
+- `OTD = DC route elapsed + relay/consolidation dwell + PI last mile`
+- do not maintain a separate "attainment vs promised OTD" reporting layer
+- for PI last mile, use case parameters rather than Task2 baseline last-mile fields:
+  - metro: `1M+ -> 4h`, `250K-1M -> 2h`, `<250K -> 1h`
+  - non-metro: `<=250 km -> 8h`, `<=500 km -> 16h`, `>500 km -> 32h`
 
 Required output grain:
 - `sim, date, year, euro_dc_id, model, realized_units`
@@ -143,7 +151,7 @@ The current Task5 framework is acceptable as a module layout. Core demand and ne
 - ✅ Dwell: Correctly assigned by node type (consolidation vs relay)
 - ✅ Sanity check: Pipeline runs successfully for year 2027
 
-Use `Task5/MISTAKE.md` for detailed fix status and `Task5/FIX_SUMMARY.md` for implementation notes.
+Use `Task5/ACTIVE_FIXES.md` for open issue list, root causes, and fix specifications.
 
 ## 7) Modification Boundaries
 
@@ -175,7 +183,7 @@ Important note:
 ## 9) AI Editing Guidance
 
 Before editing Task5:
-1. read `Task5/MISTAKE.md`
+1. read `Task5/ACTIVE_FIXES.md`
 2. confirm whether the change affects the canonical demand contract
 3. if demand-related, compare against extracted Task2 / Task4 simulator logic before editing
 4. prefer preserving data grain over adding shortcuts
@@ -204,4 +212,4 @@ When modifying downstream modules:
 Use these three files together:
 - `Task5/CONTEXT.md`: repo context and source-of-truth rules
 - `Task5/PLAN.md`: corrected modification plan for the current Task5 framework
-- `Task5/MISTAKE.md`: indexed list of known wrong parts, with references and fix direction
+- `Task5/ACTIVE_FIXES.md`: open issues, root causes, and fix specifications

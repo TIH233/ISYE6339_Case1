@@ -25,10 +25,12 @@ from .config import (
     COUNTRY_OPEN_SCHEDULE,
     CYBER_WEEK_ANNUAL_SHARE,
     DEFAULT_N_SIM,
+    DETOUR_FACTOR,
     RANDOM_SEED,
     REVENUE_PER_UNIT_EUR,
 )
 from .data_loader import load_assignment
+from .hub_network import haversine_km
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -209,8 +211,35 @@ def _prepare_assignment_reference(year: int) -> pd.DataFrame:
     fallback_last_mile = (
         assignment["otd_hours"].fillna(0.0) - assignment["travel_elapsed_hr"].fillna(0.0)
     ).clip(lower=0.0)
-    assignment["last_mile_hr"] = assignment["last_mile_hours_final"].fillna(fallback_last_mile)
+    assignment["baseline_last_mile_hr"] = assignment["last_mile_hours_final"].fillna(fallback_last_mile)
     return assignment
+
+
+def _pi_last_mile_for_metro(pop_bracket: str | float) -> tuple[float, str]:
+    bracket = str(pop_bracket) if pd.notna(pop_bracket) else ""
+    if bracket == "1M+":
+        return 4.0, "METRO_1M+"
+    if bracket == "250K-1M":
+        return 2.0, "METRO_250K-1M"
+    return 1.0, "METRO_<250K"
+
+
+def _pi_last_mile_for_nonmetro(
+    baseline_last_mile_hr: float,
+    distance_km: float | None = None,
+) -> tuple[float, str]:
+    if distance_km is not None and np.isfinite(distance_km):
+        if distance_km <= 250.0:
+            return 8.0, "NONMETRO_<=250KM"
+        if distance_km <= 500.0:
+            return 16.0, "NONMETRO_<=500KM"
+        return 32.0, "NONMETRO_>500KM"
+
+    if baseline_last_mile_hr <= 24.0:
+        return 8.0, "NONMETRO_<=250KM"
+    if baseline_last_mile_hr <= 48.0:
+        return 16.0, "NONMETRO_<=500KM"
+    return 32.0, "NONMETRO_>500KM"
 
 
 def _segment_annual_demand(
@@ -253,12 +282,43 @@ def _best_route_for_node(
     routes: pd.DataFrame,
     active_dc_ids: set[str],
 ) -> dict:
-    last_mile_hr = float(assignment_row["last_mile_hr"])
+    baseline_last_mile_hr = float(assignment_row.get("baseline_last_mile_hr", 0.0) or 0.0)
     assigned_dc = str(assignment_row["assigned_cand"])
     base_travel = float(assignment_row["travel_elapsed_hr"])
     node_id = str(assignment_row["node_id"])
     node_type = str(assignment_row["node_type"])
     country = str(assignment_row["country"])
+    node_lookup = (
+        active_nodes[["node_id", "node_type", "lat", "lng", "pop_bracket"]]
+        .drop_duplicates(subset=["node_id"])
+        .set_index("node_id")
+        .to_dict("index")
+    )
+
+    def _candidate_lastmile(candidate_dest_hub: str) -> tuple[float, str]:
+        hub_info = node_lookup.get(candidate_dest_hub, {})
+        if node_type == "metro":
+            return _pi_last_mile_for_metro(hub_info.get("pop_bracket", pd.NA))
+
+        demand_info = node_lookup.get(node_id, {})
+        if hub_info and demand_info:
+            road_km = float(
+                haversine_km(
+                    np.array([float(hub_info["lat"])]),
+                    np.array([float(hub_info["lng"])]),
+                    np.array([float(demand_info["lat"])]),
+                    np.array([float(demand_info["lng"])]),
+                )[0]
+            ) * DETOUR_FACTOR
+            return _pi_last_mile_for_nonmetro(baseline_last_mile_hr, distance_km=road_km)
+
+        return _pi_last_mile_for_nonmetro(baseline_last_mile_hr)
+
+    fallback_last_mile_hr, fallback_last_mile_band = (
+        _pi_last_mile_for_nonmetro(baseline_last_mile_hr)
+        if node_type != "metro"
+        else _pi_last_mile_for_metro(node_lookup.get(node_id, {}).get("pop_bracket", pd.NA))
+    )
 
     if node_type == "metro" and node_id not in set(active_nodes["node_id"]):
         if assigned_dc in active_dc_ids:
@@ -270,6 +330,8 @@ def _best_route_for_node(
                 "travel_elapsed_hr": 0.0,
                 "route_drive_hr": 0.0,
                 "total_hub_dwell_hr": 0.0,
+                "last_mile_hr": fallback_last_mile_hr,
+                "last_mile_band": fallback_last_mile_band,
                 "n_relay_hubs": 0,
                 "n_consol_hubs": 1,
                 "route_backed": True,
@@ -284,6 +346,8 @@ def _best_route_for_node(
             "travel_elapsed_hr": base_travel,
             "route_drive_hr": base_travel,
             "total_hub_dwell_hr": 0.0,
+            "last_mile_hr": fallback_last_mile_hr,
+            "last_mile_band": fallback_last_mile_band,
             "n_relay_hubs": 0,
             "n_consol_hubs": 0,
             "route_backed": False,
@@ -308,12 +372,17 @@ def _best_route_for_node(
             "travel_elapsed_hr": base_travel,
             "route_drive_hr": base_travel,
             "total_hub_dwell_hr": 0.0,
+            "last_mile_hr": fallback_last_mile_hr,
+            "last_mile_band": fallback_last_mile_band,
             "n_relay_hubs": 0,
             "n_consol_hubs": 0,
             "route_backed": False,
         }
 
-    candidates["service_otd_hr"] = candidates["total_elapsed_hr"] + last_mile_hr
+    lastmile_meta = candidates["dest_hub"].map(_candidate_lastmile)
+    candidates["pi_last_mile_hr"] = lastmile_meta.map(lambda x: x[0])
+    candidates["last_mile_band"] = lastmile_meta.map(lambda x: x[1])
+    candidates["service_otd_hr"] = candidates["total_elapsed_hr"] + candidates["pi_last_mile_hr"]
     chosen = candidates.sort_values(
         ["service_otd_hr", "detour_ratio", "total_elapsed_hr", "route_id"]
     ).iloc[0]
@@ -327,6 +396,8 @@ def _best_route_for_node(
         "total_hub_dwell_hr": float(
             chosen.get("total_hub_dwell_hr", chosen["total_elapsed_hr"] - chosen.get("total_drive_hr", 0.0))
         ),
+        "last_mile_hr": float(chosen["pi_last_mile_hr"]),
+        "last_mile_band": str(chosen["last_mile_band"]),
         "n_relay_hubs": int(chosen.get("n_relay_stops", 0)),
         "n_consol_hubs": int(chosen.get("n_consol_stops", 0)),
         "route_backed": True,
@@ -363,7 +434,7 @@ def build_service_matrix(
             routes=routes,
             active_dc_ids=active_dc_ids,
         )
-        otd_hours = float(route_service["travel_elapsed_hr"]) + float(assignment_series["last_mile_hr"])
+        otd_hours = float(route_service["travel_elapsed_hr"]) + float(route_service["last_mile_hr"])
         segment = str(assignment_series["segment"])
         purchase_prob = get_otd_conversion_rate(segment, otd_hours)
         annual_potential = (
@@ -388,7 +459,8 @@ def build_service_matrix(
             "route_drive_hr": float(route_service["route_drive_hr"]),
             "total_hub_dwell_hr": float(route_service["total_hub_dwell_hr"]),
             "travel_elapsed_hr": float(route_service["travel_elapsed_hr"]),
-            "last_mile_hr": float(assignment_series["last_mile_hr"]),
+            "last_mile_hr": float(route_service["last_mile_hr"]),
+            "last_mile_band": str(route_service["last_mile_band"]),
             "otd_hours": otd_hours,
             "otd_bucket": _otd_bucket(otd_hours),
             "purchase_prob": purchase_prob,

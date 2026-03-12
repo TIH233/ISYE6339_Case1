@@ -2,7 +2,7 @@
 pipeline.py — Year-by-year orchestrator for the Task 5 PI network model.
 
 Loop: 2027 → 2034, each year:
-  1. Activate hubs (peri-urban + border relay) for open countries
+  1. Activate hubs (peri-urban + relay) for open countries
   2. Generate all lane candidates
   3. PI demand pipeline (demand_generator)
   4. DC capacity simulation (flow_model)
@@ -27,14 +27,14 @@ from .hub_network import (
 )
 from .evaluator import (
     compute_all_kpis,
+    build_otd_profile,
     eval_52_container_requirements,
     eval_510_dc_capacity_sizing,
     eval_511_transload_cost,
     eval_512_profitability,
     eval_59_lane_cost_carbon,
     summarise_cost_carbon,
-    simulate_otd_attainment,
-    summarise_otd_by_bracket,
+    summarise_otd_by_class,
     eval_56_autonomy,
     trace_joint_shipment,
 )
@@ -147,26 +147,18 @@ def run_pipeline(
                 year=year,
             )
 
-        # OTD Monte Carlo simulation (5.3)
-        otd_sim_df    = pd.DataFrame()
-        otd_by_bracket = pd.DataFrame()
-        if not routes.empty:
-            hub_brackets = active[active["node_type"] == "PERI_URBAN_HUB"][
-                ["node_id", "pop_bracket"]
-            ].copy()
-            otd_sim_df     = simulate_otd_attainment(
-                routes,
-                hub_brackets,
-                n_sim=n_sim,
-                seed=seed,
-            )
-            otd_by_bracket = summarise_otd_by_bracket(otd_sim_df)
-            if verbose and not otd_by_bracket.empty:
+        # OTD profile (5.3): same end-to-end OTD used by demand conversion
+        otd_profile_df = pd.DataFrame()
+        otd_by_class = pd.DataFrame()
+        if not service_matrix.empty:
+            otd_profile_df = build_otd_profile(service_matrix)
+            otd_by_class = summarise_otd_by_class(otd_profile_df)
+            if verbose and not otd_by_class.empty:
                 print(
-                    f"  OTD attainment: "
+                    "  OTD profile: "
                     + "  ".join(
-                        f"{r.pop_bracket}→{r.pi_promise_hr:.0f}hr attn={r.mean_attainment:.2%}"
-                        for r in otd_by_bracket.itertuples()
+                        f"{r.service_class} mean={r.mean_otd_hr:.2f}h p95={r.p95_otd_hr:.2f}h"
+                        for r in otd_by_class.itertuples()
                     )
                 )
 
@@ -182,6 +174,7 @@ def run_pipeline(
             routes=routes,
             service_matrix=service_matrix if not service_matrix.empty else None,
             lane_cost_df=lane_cost_df if not lane_cost_df.empty else None,
+            total_pi_units=total_pi_units,
         )
 
         # Profitability (5.12)
@@ -223,8 +216,8 @@ def run_pipeline(
             "dc_demand_intervals": dc_intervals,
             "container_analysis":  container_analysis,
             "lane_cost_df":        lane_cost_df,
-            "otd_sim_df":          otd_sim_df,
-            "otd_by_bracket":      otd_by_bracket,
+            "otd_profile_df":      otd_profile_df,
+            "otd_by_class":        otd_by_class,
             "autonomy":            autonomy,
             "transload":           transload,
             "profitability":       profitability,
@@ -242,8 +235,11 @@ def run_pipeline(
         yr = res["year"]
         if not res["dc_capacity"].empty:
             res["dc_capacity"].to_csv(OUTPUT_DIR / f"dc_capacity_{yr}.csv", index=False)
-        if not res["otd_sim_df"].empty:
-            res["otd_sim_df"].to_csv(OUTPUT_DIR / f"otd_simulation_{yr}.csv", index=False)
+        stale_otd = OUTPUT_DIR / f"otd_simulation_{yr}.csv"
+        if stale_otd.exists():
+            stale_otd.unlink()
+        if not res["otd_profile_df"].empty:
+            res["otd_profile_df"].to_csv(OUTPUT_DIR / f"otd_profile_{yr}.csv", index=False)
         if not res["lane_cost_df"].empty:
             res["lane_cost_df"].to_csv(OUTPUT_DIR / f"lane_cost_carbon_{yr}.csv", index=False)
 
@@ -258,9 +254,12 @@ def run_pipeline(
         if "derived_from_pair" in all_relays.columns:
             dedupe_cols.append("derived_from_pair")
         all_relays = all_relays.drop_duplicates(subset=dedupe_cols)
-        all_relays.to_csv(DATA_DIR / "border_relay_hubs.csv", index=False)
+        stale_border_relays = DATA_DIR / "border_relay_hubs.csv"
+        if stale_border_relays.exists():
+            stale_border_relays.unlink()
+        all_relays.to_csv(DATA_DIR / "relay_hubs.csv", index=False)
         if verbose:
-            print(f"  Written border_relay_hubs.csv ({len(all_relays)} rows)")
+            print(f"  Written relay_hubs.csv ({len(all_relays)} rows)")
 
     return pipeline_results
 
@@ -278,11 +277,11 @@ def print_kpi_summary(pipeline_results: list[dict]) -> None:
             "Year":           k["year"],
             "DC":             k.get("n_dc", 0),
             "Hubs":           k.get("n_peri_urban_hub", 0),
-            "Relays":         k.get("n_relay_hub", 0) + k.get("n_border_relay_hub", 0),
+            "Relays":         k.get("n_relay_hub", 0),
             "Lanes":          k.get("n_lanes_total", 0),
             "Coverage%":      k.get("coverage_pct"),
             "Relay%":         k.get("relay_readiness_pct"),
-            "OTD attn":       k.get("mean_otd_attainment"),
+            "OTD hr":         k.get("mean_service_otd_hr"),
             "Route hr":       k.get("mean_route_elapsed_hr"),
             "CO2 kg/unit":    k.get("co2_per_unit_kg"),
             "Margin €M":      round(p.get("pi_margin_eur", 0) / 1e6, 2),

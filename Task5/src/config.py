@@ -102,13 +102,13 @@ DETOUR_RATIO_MAX        = 1.35    # max allowed routed_km / direct_km
 
 # DC→PERI_URBAN_HUB lane routing thresholds
 DC_HUB_DIRECT_MAX_HR    = 4       # drive_time ≤ 4hr → direct lane
-DC_HUB_RELAY_MAX_HR     = 10      # 4–10hr → via border relay; >10hr → via DC-DC
+DC_HUB_RELAY_MAX_HR     = 10      # legacy threshold reference for relay routing
 
-# Border relay hub derivation thresholds
+# Relay hub derivation thresholds
 BORDER_RELAY_MAX_DIST_KM    = 300   # max distance from midpoint to each country centroid
 BORDER_RELAY_MERGE_KM       = 80    # merge with peri-urban hub if within this distance
-DC_TO_BORDER_RELAY_MAX_KM   = 1000  # max DC → border relay lane distance
-BORDER_RELAY_TO_HUB_MAX_KM  = 300   # max border relay → peri-urban hub distance
+DC_TO_BORDER_RELAY_MAX_KM   = 1000  # max DC → relay lane distance
+BORDER_RELAY_TO_HUB_MAX_KM  = 300   # max relay → peri-urban hub distance
 HUB_CORRIDOR_MAX_KM         = 300   # max hub↔hub corridor distance
 
 # ---------------------------------------------------------------------------

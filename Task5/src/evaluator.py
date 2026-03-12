@@ -214,109 +214,84 @@ def eval_52_container_requirements(annual_units: float) -> dict:
 
 
 # ============================================================================
-# PART 4 — Task 5.3: Transport time simulation (numpy Monte Carlo)
+# PART 4 — Task 5.3: Route-backed OTD profile
 # ============================================================================
 
-def simulate_otd_attainment(
-    routes: pd.DataFrame,
-    hub_brackets: pd.DataFrame,
-    n_sim: int = DEFAULT_N_SIM,
-    seed: int = RANDOM_SEED,
-) -> pd.DataFrame:
+def build_otd_profile(service_matrix: pd.DataFrame) -> pd.DataFrame:
     """
-    Task 5.3: Monte Carlo simulation of PI route promise attainment.
+    Task 5.3: Deterministic end-to-end PI OTD profile.
+
+    This uses the exact service-matrix OTD that drives demand conversion:
+      OTD = route travel elapsed + relay/consolidation dwell + PI last mile
+
+    No separate attainment/promise layer is computed.
     """
-    if routes.empty or hub_brackets.empty:
+    if service_matrix.empty:
         return pd.DataFrame()
 
-    best_routes = (
-        routes.sort_values(["dest_hub", "total_elapsed_hr", "detour_ratio"])
-        .drop_duplicates(subset=["dest_hub"], keep="first")
-        .copy()
-    )
-    df = best_routes.merge(
-        hub_brackets[["node_id", "pop_bracket"]],
-        left_on="dest_hub",
-        right_on="node_id",
-        how="left",
-    )
-    df = df.dropna(subset=["pop_bracket"])
-    if df.empty:
-        return pd.DataFrame()
+    profile = service_matrix.copy()
+    if "last_mile_band" not in profile.columns:
+        profile["last_mile_band"] = pd.NA
 
-    promise_map = {"1M+": 4.0, "250K-1M": 2.0, "<250K": 1.0}
-    df["pi_promise_hr"] = df["pop_bracket"].map(promise_map).fillna(4.0)
-
-    rng = np.random.default_rng(seed)
-    n_hubs = len(df)
-
-    base_drive = (
-        df["total_elapsed_hr"].to_numpy(dtype=float)
-        - df["n_relay_stops"].to_numpy(dtype=float) * HUB_RELAY_DWELL_HR
-        - df["n_consol_stops"].to_numpy(dtype=float) * HUB_CONSOL_DWELL_HR
-    )
-    base_drive = np.clip(base_drive, 0.0, None)
-    road_km = df["total_distance_km"].to_numpy(dtype=float)
-    promises = df["pi_promise_hr"].to_numpy(dtype=float)
-
-    speed_factor = rng.normal(1.0, DRIVE_SPEED_SIGMA_FRAC, size=(n_sim, n_hubs))
-    speed_factor = np.clip(speed_factor, 0.5, 1.8)
-    relay_dwell_factor = rng.uniform(
-        1.0 - DWELL_UNCERTAINTY_FRAC,
-        1.0 + DWELL_UNCERTAINTY_FRAC,
-        size=(n_sim, n_hubs),
-    )
-    consol_dwell_factor = rng.uniform(
-        1.0 - DWELL_UNCERTAINTY_FRAC,
-        1.0 + DWELL_UNCERTAINTY_FRAC,
-        size=(n_sim, n_hubs),
+    profile["service_class"] = np.where(
+        profile["node_type"].astype(str).str.lower() == "metro",
+        "METRO_" + profile["pop_bracket"].fillna("UNKNOWN").astype(str),
+        profile["last_mile_band"].fillna("NONMETRO_UNKNOWN").astype(str),
     )
 
-    sim_drive = base_drive[None, :] / speed_factor
-    sim_relay_dwell = (
-        df["n_relay_stops"].to_numpy(dtype=float)[None, :]
-        * HUB_RELAY_DWELL_HR
-        * relay_dwell_factor
-    )
-    sim_consol_dwell = (
-        df["n_consol_stops"].to_numpy(dtype=float)[None, :]
-        * HUB_CONSOL_DWELL_HR
-        * consol_dwell_factor
-    )
-    sim_elapsed = sim_drive + sim_relay_dwell + sim_consol_dwell
-
-    attainment = (sim_elapsed <= promises[None, :]).mean(axis=0)
-    p5 = np.percentile(sim_elapsed, 5, axis=0)
-    p50 = np.percentile(sim_elapsed, 50, axis=0)
-    p95 = np.percentile(sim_elapsed, 95, axis=0)
-
-    result = df[
-        ["dest_hub", "origin_dc", "service_mode", "pop_bracket", "pi_promise_hr"]
-    ].copy()
-    result = result.rename(columns={"dest_hub": "node_id"})
-    result["mean_drive_hr"] = base_drive.round(3)
-    result["road_km"] = road_km.round(1)
-    result["attainment_rate"] = attainment.round(4)
-    result["p5_elapsed_hr"] = p5.round(3)
-    result["p50_elapsed_hr"] = p50.round(3)
-    result["p95_elapsed_hr"] = p95.round(3)
-    result["promise_gap_hr"] = (result["p50_elapsed_hr"] - result["pi_promise_hr"]).round(3)
-
-    return result.reset_index(drop=True)
+    cols = [
+        "year",
+        "node_id",
+        "node_type",
+        "service_class",
+        "pop_bracket",
+        "country",
+        "assigned_dc_id",
+        "route_id",
+        "service_mode",
+        "route_backed",
+        "n_relay_hubs",
+        "n_consol_hubs",
+        "route_drive_hr",
+        "total_hub_dwell_hr",
+        "travel_elapsed_hr",
+        "last_mile_hr",
+        "otd_hours",
+        "otd_bucket",
+        "purchase_prob",
+        "annual_potential_units",
+        "annual_realized_units",
+    ]
+    return profile[[c for c in cols if c in profile.columns]].reset_index(drop=True)
 
 
-def summarise_otd_by_bracket(otd_df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate OTD simulation results by pop_bracket."""
+def summarise_otd_by_class(otd_df: pd.DataFrame) -> pd.DataFrame:
     if otd_df.empty:
         return pd.DataFrame()
-    grp = otd_df.groupby("pop_bracket").agg(
-        n_hubs=("node_id", "count"),
-        pi_promise_hr=("pi_promise_hr", "first"),
-        mean_attainment=("attainment_rate", "mean"),
-        mean_p50_elapsed=("p50_elapsed_hr", "mean"),
-        mean_promise_gap_hr=("promise_gap_hr", "mean"),
+
+    grp = otd_df.groupby("service_class", dropna=False).agg(
+        node_type=("node_type", "first"),
+        n_nodes=("node_id", "count"),
+        route_backed_pct=("route_backed", "mean"),
+        mean_travel_elapsed_hr=("travel_elapsed_hr", "mean"),
+        mean_last_mile_hr=("last_mile_hr", "mean"),
+        mean_otd_hr=("otd_hours", "mean"),
+        p50_otd_hr=("otd_hours", "median"),
+        p95_otd_hr=("otd_hours", lambda s: float(np.percentile(s, 95))),
+        mean_purchase_prob=("purchase_prob", "mean"),
+        annual_realized_units=("annual_realized_units", "sum"),
     ).reset_index()
-    grp["mean_attainment"] = grp["mean_attainment"].round(4)
+    grp["route_backed_pct"] = (grp["route_backed_pct"] * 100).round(2)
+    for col in [
+        "mean_travel_elapsed_hr",
+        "mean_last_mile_hr",
+        "mean_otd_hr",
+        "p50_otd_hr",
+        "p95_otd_hr",
+        "mean_purchase_prob",
+        "annual_realized_units",
+    ]:
+        grp[col] = grp[col].round(3)
     return grp
 
 
@@ -709,6 +684,7 @@ def eval_59_lane_cost_carbon(
         df.loc[ocean_mask, "transport_cost_eur"] = (
             teus * OCEAN_CONTAINER_EUR
         ).round(2)
+        df.loc[ocean_mask, "truckloads"] = teus  # show TEU count, not pallet-derived count
 
     df["year"] = year
     return df[[
@@ -718,19 +694,28 @@ def eval_59_lane_cost_carbon(
     ]]
 
 
-def summarise_cost_carbon(lane_cost_df: pd.DataFrame) -> dict:
-    """Aggregate cost and carbon totals from eval_59_lane_cost_carbon output."""
+def summarise_cost_carbon(
+    lane_cost_df: pd.DataFrame,
+    total_units: float | None = None,
+) -> dict:
+    """Aggregate cost and carbon totals from eval_59_lane_cost_carbon output.
+
+    total_units: delivered PI units (from service_matrix), used as per-unit
+    denominator.  Falls back to sum of lane-level annual_flow when not supplied
+    (legacy behaviour, but incorrect for multi-leg routes).
+    """
     if lane_cost_df.empty:
         return {}
     total_cost = float(lane_cost_df["transport_cost_eur"].sum())
     total_co2  = float(lane_cost_df["co2_kg"].sum())
     total_flow = float(lane_cost_df["annual_flow"].sum())
+    unit_denom = total_units if (total_units and total_units > 0) else max(total_flow, 1)
     by_type = lane_cost_df.groupby("lane_type")[["transport_cost_eur", "co2_kg"]].sum()
     return {
         "total_transport_cost_eur":  round(total_cost, 0),
         "total_co2_kg":              round(total_co2, 0),
-        "co2_per_unit_kg":           round(total_co2 / max(total_flow, 1), 3),
-        "cost_per_unit_eur":         round(total_cost / max(total_flow, 1), 3),
+        "co2_per_unit_kg":           round(total_co2 / unit_denom, 3),
+        "cost_per_unit_eur":         round(total_cost / unit_denom, 3),
         "by_lane_type":              by_type.to_dict(),
     }
 
@@ -910,6 +895,7 @@ def compute_all_kpis(
     routes: pd.DataFrame | None = None,
     service_matrix: pd.DataFrame | None = None,
     lane_cost_df: pd.DataFrame | None = None,
+    total_pi_units: float | None = None,
 ) -> dict:
     """
     Compute all Task 5 KPIs for a given year.
@@ -919,8 +905,12 @@ def compute_all_kpis(
 
     # ---- Node/lane counts ----
     kpis["n_nodes_total"] = len(active_nodes)
-    for nt in ["PORT", "DC", "PERI_URBAN_HUB", "RELAY_HUB", "BORDER_RELAY_HUB", "DEMAND_NONMETRO"]:
-        kpis[f"n_{nt.lower()}"] = int((active_nodes["node_type"] == nt).sum())
+    kpis["n_port"] = int((active_nodes["node_type"] == "PORT").sum())
+    kpis["n_dc"] = int((active_nodes["node_type"] == "DC").sum())
+    kpis["n_peri_urban_hub"] = int((active_nodes["node_type"] == "PERI_URBAN_HUB").sum())
+    # Legacy BORDER_RELAY_HUB rows are folded into relay hub counts.
+    kpis["n_relay_hub"] = int(active_nodes["node_type"].isin(["RELAY_HUB", "BORDER_RELAY_HUB"]).sum())
+    kpis["n_demand_nonmetro"] = int((active_nodes["node_type"] == "DEMAND_NONMETRO").sum())
     kpis["n_lanes_total"] = len(lanes)
 
     # ---- 5.1 topology ----
@@ -929,30 +919,20 @@ def compute_all_kpis(
     kpis.update(compute_relay_readiness(lanes))
     kpis.update(compute_dc_dc_connectivity(active_nodes, lanes))
 
-    if routes is not None and not routes.empty:
-        hub_brackets = active_nodes[active_nodes["node_type"] == "PERI_URBAN_HUB"][
-            ["node_id", "pop_bracket"]
-        ].copy()
-        otd_sim = simulate_otd_attainment(
-            routes,
-            hub_brackets,
-        )
-        if not otd_sim.empty:
-            kpis["mean_otd_attainment"]  = round(float(otd_sim["attainment_rate"].mean()), 4)
-            kpis["pct_hubs_above_90pct"] = round(float((otd_sim["attainment_rate"] >= 0.9).mean() * 100), 2)
-            kpis["mean_route_elapsed_hr"] = round(float(otd_sim["p50_elapsed_hr"].mean()), 3)
-
     # ---- 5.6 autonomy ----
     aut = eval_56_autonomy(active_nodes, lanes, year)
     kpis["dual_role_hubs"]   = aut["dual_role_hubs"]
     kpis["dual_role_pct"]    = aut["dual_role_pct"]
 
     if service_matrix is not None and not service_matrix.empty:
+        kpis["mean_route_elapsed_hr"] = round(float(service_matrix["travel_elapsed_hr"].mean()), 3)
         kpis["mean_service_otd_hr"] = round(float(service_matrix["otd_hours"].mean()), 3)
+        kpis["p95_service_otd_hr"] = round(float(np.percentile(service_matrix["otd_hours"], 95)), 3)
+        kpis["mean_purchase_prob"] = round(float(service_matrix["purchase_prob"].mean()), 4)
         kpis["route_backed_service_pct"] = round(float(service_matrix["route_backed"].mean() * 100), 2)
 
     if lane_cost_df is not None and not lane_cost_df.empty:
-        cc = summarise_cost_carbon(lane_cost_df)
+        cc = summarise_cost_carbon(lane_cost_df, total_units=total_pi_units)
         kpis["total_transport_cost_eur"] = cc.get("total_transport_cost_eur")
         kpis["total_co2_kg"]             = cc.get("total_co2_kg")
         kpis["co2_per_unit_kg"]          = cc.get("co2_per_unit_kg")
