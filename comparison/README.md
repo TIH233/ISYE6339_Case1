@@ -30,6 +30,30 @@ This folder compares the old network (Task4 baseline) with the PI network (Task5
 - `data/dc_load_comparison_by_year.csv`
 - `data/dc_load_comparison_2030.csv`
 - `data/horizon_comparison.csv`
+- `data/horizon_efficiency_summary.csv`
+- `data/pi_dominance_scorecard.csv`
+- `data/pi_tradeoff_metrics.csv`
+- `figures/pi_vs_old_performance_overview.png`
+- `figures/pi_vs_old_efficiency_frontier.png`
+- `figures/pi_vs_old_shipping_and_dc_load.png`
+- `figures/pi_vs_old_horizon_advantage.png`
+- `figures/pi_tradeoff_overview.png`
+
+## Visual Framing
+
+- The plots are limited to matched metrics where the PI network outperforms the old network on a consistent basis and denominator.
+- Higher-is-better plots: realized units, revenue.
+- Lower-is-better plots: transport cost per unit, network-scope cost per unit, shipping units per 1000 sold units.
+- `pi_dominance_scorecard.csv` confirms the PI network wins on each selected metric in every year from 2027 to 2034.
+
+## PI Trade-Offs
+
+- `pi_tradeoff_metrics.csv` tracks areas where the PI design is weaker or harder to run, even though its matched economic KPIs are better.
+- 2030 coverage shortfall: 2.60 percentage points below full coverage.
+- 2030 relay network not ready: 30.72%.
+- 2030 service tail spread: 16.74 hours between mean and p95 service time.
+- 2030 operating touchpoints vs old network: 88.0x.
+- These are plausible side effects of the hyperconnected design: broader reach, more relay dependence, more multi-hop flows, and much higher orchestration complexity.
 
 ## 2030 Snapshot
 
@@ -44,10 +68,13 @@ This folder compares the old network (Task4 baseline) with the PI network (Task5
 - Task4 notebook totals were reconciled back to the report-bundle yearly demand file.
 - Task4 full total cost was recomputed from its component blocks and matched the notebook profitability table.
 - Task5 demand and profitability outputs differ by at most 2 units per year because of rounding; the comparison keeps exact demand from the Task5 demand summary.
-- PDF text extraction for the case manual was not reliable in this environment because the PDF uses embedded font encoding.
-  The Task5 subtask framing used here follows the repo's notebook headings and output contracts.
+- The case PDF is machine-readable in this environment and was used to confirm that Task 5 is the hyperconnected transportation workstream.
+- The comparison avoids apples-to-oranges claims such as Task4 full operating profit versus Task5 network-scope margin.
+- The trade-off metrics are intentionally labeled as trade-offs where no direct old-network KPI exists in the saved repo outputs.
 
 ## Horizon Check
 
 - Task4 notebook horizon revenue: 258685366 EUR
 - Task4 parsed yearly revenue total: 258685360 EUR
+- PI cumulative realized-units advantage: 201.5%
+- PI cumulative network-scope cost-per-unit reduction: 88.2%
