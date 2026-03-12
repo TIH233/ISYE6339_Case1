@@ -1,0 +1,9 @@
+year,old_euro_dc_count,old_eurodc_required_workers,old_savannah_dc_count,old_savannah_required_workers,old_georgia_peak_active_trucks,old_georgia_peak_active_chassis,old_europe_peak_active_trucks,old_europe_peak_active_chassis,pi_dc_count,pi_peri_urban_hub_count,pi_relay_hub_count,pi_lane_count,coverage_pct,relay_readiness_pct,dc_dc_connectivity_pct,dual_role_hubs,dual_role_pct
+2027,1,6.0,1,4.0,16,16,17,34,1,71,0,2622,100.0,98.09,100.0,0,0.0
+2028,2,18.0,1,8.0,31,31,45,90,2,111,23,3462,99.1,89.57,100.0,56,50.45
+2029,3,35.0,1,17.0,79,79,97,193,3,232,103,6667,97.41,74.73,100.0,182,78.45
+2030,4,71.0,1,26.0,123,123,209,418,4,269,167,8151,97.4,69.28,100.0,250,92.94
+2031,4,59.0,1,30.0,142,142,175,350,4,269,167,8151,97.4,69.28,100.0,250,92.94
+2032,4,59.0,1,34.0,161,161,168,335,4,269,167,8151,97.4,69.28,100.0,250,92.94
+2033,4,71.0,1,35.0,165,165,212,423,4,269,167,8151,97.4,69.28,100.0,250,92.94
+2034,4,74.0,1,38.0,179,179,218,436,4,269,167,8151,97.4,69.28,100.0,250,92.94
