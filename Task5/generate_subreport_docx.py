@@ -72,6 +72,8 @@ def build_narrative() -> list[dict[str, str]]:
     transload_2030 = transload.loc[transload["year"] == 2030].iloc[0]
     profit_2030 = profit.loc[profit["year"] == 2030].iloc[0]
     comp_2027 = comparison.loc[comparison["year"] == 2027].iloc[0]
+    comp_2028 = comparison.loc[comparison["year"] == 2028].iloc[0]
+    comp_2029 = comparison.loc[comparison["year"] == 2029].iloc[0]
     comp_2030 = comparison.loc[comparison["year"] == 2030].iloc[0]
     comp_2034 = comparison.loc[comparison["year"] == 2034].iloc[0]
     tradeoff_2030 = tradeoff.loc[tradeoff["year"] == 2030].set_index("metric_key")
@@ -135,48 +137,195 @@ def build_narrative() -> list[dict[str, str]]:
             ),
         },
         {"style": "Heading1", "text": "Task 5.1: Network Design and Roadmap"},
+        {"style": "Heading2", "text": "Design Logic"},
         {
-            "style": "Normal",
+            "style": "SpecLine",
             "text": (
-                "The implemented PI design is a phased multi-tier network rather than a fully "
-                "enumerated pan-European mesh. Rotterdam is the fixed port entry, Euro DCs open "
-                "progressively from 2027 to 2030, peri-urban hubs are created from the metro-city "
-                "layer, and non-metro demand centroids are retained as service sinks. Relay hubs "
-                "are generated algorithmically whenever a DC-to-market movement breaches the "
-                "11-hour single-driver threshold. Candidate relays are placed at the mid-journey "
-                "point, clustered within 80 km, and merged with nearby peri-urban hubs when "
-                "possible so the network reuses open infrastructure instead of inventing a dense "
-                "new bespoke hub system."
+                "Objective: exploit existing open PI infrastructure to connect Rotterdam, Euro DCs, "
+                "peri-urban metro hubs, and non-metro country demand with relay capability and low detour."
             ),
         },
         {
-            "style": "Normal",
+            "style": "Bullet",
             "text": (
-                "The lane design mirrors the PDF requirements: port-to-DC trunk links, DC-to-DC "
-                "transfer links, direct DC-to-hub lanes when a market is within four driving hours, "
-                "DC-to-relay legs for long-haul support, relay-to-hub feeders, and short hub "
-                "corridors. Routes are selected by shortest elapsed time, not raw distance, using "
-                "one hour of dwell at relay-only hubs and two hours at consolidation-capable hubs. "
-                "That gives a network focused on daily departures, relay continuity, and low detour. "
-                f"The rollout grows from {fmt_int(float((roadmap_2027['node_type'] == 'PERI_URBAN_HUB').sum()))} peri-urban hubs "
-                f"and {fmt_int(float(comp_2027['pi_lane_count']))} lanes in 2027 to "
+                "- Base nodes: 1 Rotterdam port, 4 Euro DCs, peri-urban hubs from the metro layer "
+                "(excluding DC cities), and 1 non-metro centroid per country."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                "- Activation: only countries in the saved opening schedule are live in each year, so "
+                "the topology grows with the market rollout instead of assuming instant Europe-wide coverage."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                "- Relay rule: if a DC-to-destination movement exceeds the 11-hour single-driver limit, "
+                "create a relay candidate near the midpoint, cluster candidates within 80 km, and reuse "
+                "a nearby peri-urban hub when possible."
+            ),
+        },
+        {
+            "style": "Formula",
+            "text": (
+                r"[Formula Placeholder] \quad t^{drive}_{ij}=\frac{d^{hav}_{ij}\cdot \alpha_{detour}}{v_{truck}}"
+            ),
+        },
+        {
+            "style": "Formula",
+            "text": (
+                r"[Formula Placeholder] \quad \text{RelayTrigger}_{ij}=\mathbf{1}\left[t^{drive}_{ij}>11\right]"
+            ),
+        },
+        {"style": "Heading2", "text": "Lane Structure"},
+        {
+            "style": "Bullet",
+            "text": "- PORT_DC: Rotterdam to every active DC for inbound European entry."
+        },
+        {
+            "style": "Bullet",
+            "text": "- DC_DC: all active DC pairs for inter-DC balancing and inventory transfers."
+        },
+        {
+            "style": "Bullet",
+            "text": "- DC_HUB_DIRECT: active when a peri-urban hub is within 4 driving hours of a DC."
+        },
+        {
+            "style": "Bullet",
+            "text": "- DC_RELAY + RELAY_HUB: long-haul support from DC to relay and relay to peri-urban hub."
+        },
+        {
+            "style": "Bullet",
+            "text": "- HUB_CORRIDOR: short inter-hub corridor up to 300 km for local PI continuity."
+        },
+        {
+            "style": "Formula",
+            "text": (
+                r"[Formula Placeholder] \quad r^*(d,h)=\arg\min_{r\in\mathcal{R}(d,h)}\sum_{\ell\in r}\left(t^{drive}_{\ell}+t^{dwell}_{\ell}\right)"
+            ),
+        },
+        {
+            "style": "Formula",
+            "text": (
+                r"[Formula Placeholder] \quad \frac{D^{route}_{r}}{D^{direct}_{dh}}\leq 1.35"
+            ),
+        },
+        {
+            "style": "SpecLine",
+            "text": (
+                "Dwell convention: 1 hour at relay-only hubs and 2 hours at consolidation-capable nodes "
+                "(DCs and peri-urban hubs)."
+            ),
+        },
+        {"style": "Heading2", "text": "Demand Interface"},
+        {
+            "style": "Bullet",
+            "text": (
+                "- Best-route overlay: the demand generator applies the saved route table to Task 4 "
+                "assignment weights and selects the lowest-service-OTD route for each market."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                "- PI last mile: metro promises use 4/2/1 hours by population bracket; non-metro promises "
+                "use 8/16/32 hours by distance band."
+            ),
+        },
+        {
+            "style": "Formula",
+            "text": (
+                r"[Formula Placeholder] \quad OTD_n=T_{r^*(n)}+LM_n"
+            ),
+        },
+        {
+            "style": "Formula",
+            "text": (
+                r"[Formula Placeholder] \quad Q^{realized}_n=Q^{potential}_n\cdot p\!\left(OTD_n,\;segment_n\right)"
+            ),
+        },
+        {
+            "style": "SpecLine",
+            "text": (
+                "Interpretation: Task 5.1 is the network-logic layer that directly feeds Task 5.3 transport "
+                "times and Task 5.5 realized demand."
+            ),
+        },
+        {"style": "Heading2", "text": "Roadmap Summary"},
+        {
+            "style": "Bullet",
+            "text": (
+                f"- 2027: 1 DC, {fmt_int(float((roadmap_2027['node_type'] == 'PERI_URBAN_HUB').sum()))} peri-urban hubs, "
+                f"0 relay hubs, {fmt_int(float(comp_2027['pi_lane_count']))} lanes, 4 open countries."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                f"- 2028: {fmt_int(float((roadmap_2028['node_type'] == 'DC').sum()))} DCs, "
+                f"{fmt_int(float((roadmap_2028['node_type'] == 'PERI_URBAN_HUB').sum()))} peri-urban hubs, "
+                f"{fmt_int(float((roadmap_2028['node_type'] == 'RELAY_HUB').sum()))} relay hubs, "
+                f"{fmt_int(float(comp_2028['pi_lane_count']))} lanes, 12 open countries."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                f"- 2029: {fmt_int(float((roadmap_2029['node_type'] == 'DC').sum()))} DCs, "
+                f"{fmt_int(float((roadmap_2029['node_type'] == 'PERI_URBAN_HUB').sum()))} peri-urban hubs, "
+                f"{fmt_int(float((roadmap_2029['node_type'] == 'RELAY_HUB').sum()))} relay hubs, "
+                f"{fmt_int(float(comp_2029['pi_lane_count']))} lanes, 19 open countries."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                f"- 2030 onward: {fmt_int(float(row_2030['n_dc']))} DCs, "
                 f"{fmt_int(float(row_2030['n_peri_urban_hub']))} peri-urban hubs, "
-                f"{fmt_int(float(row_2030['n_relay_hub']))} relay hubs, and "
-                f"{fmt_int(float(row_2030['n_lanes_total']))} lanes by 2030. Coverage reaches "
-                f"{fmt_pct(float(row_2030['coverage_pct']), 2)} with mean detour "
-                f"{fmt_num(float(row_2030['mean_detour']), 3)}."
+                f"{fmt_int(float(row_2030['n_relay_hub']))} relay hubs, "
+                f"{fmt_int(float(row_2030['n_lanes_total']))} lanes, 29 open countries, stable topology through 2034."
+            ),
+        },
+        {"style": "Heading2", "text": "Validation Snapshot"},
+        {
+            "style": "Bullet",
+            "text": (
+                f"- Coverage: {fmt_pct(float(row_2030['coverage_pct']), 2)} of feasible port/DC-to-hub pairs."
             ),
         },
         {
-            "style": "Normal",
+            "style": "Bullet",
             "text": (
-                "The yearly roadmap is also clear. 2027 is a northwestern core with 1 DC and no "
-                f"relay hubs. 2028 adds the second DC and about {fmt_int(float((roadmap_2028['node_type'] == 'RELAY_HUB').sum()))} relay hubs. "
-                f"2029 expands the footprint to {fmt_int(float((roadmap_2029['node_type'] == 'DC').sum()))} DCs, "
-                f"{fmt_int(float((roadmap_2029['node_type'] == 'PERI_URBAN_HUB').sum()))} peri-urban hubs, and "
-                f"{fmt_int(float((roadmap_2029['node_type'] == 'RELAY_HUB').sum()))} relay hubs. By 2030 the full "
-                "network is in place and remains topologically stable through 2034, which makes the "
-                "later changes mostly volume-driven rather than topology-driven."
+                f"- DC connectivity: {fmt_pct(float(row_2030['dc_dc_connectivity_pct']), 2)} with all 6 DC pairs connected."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                f"- Detour control: mean detour {fmt_num(float(row_2030['mean_detour']), 3)} and "
+                f"{fmt_pct(float(row_2030['pct_within_limit']), 2)} of accepted routes within the 1.35 cap."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                f"- Route-backed service: {fmt_pct(float(row_2030['route_backed_service_pct']), 2)} of service nodes."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                f"- Relay depth: {fmt_int(float(row_2030['n_relay_hub']))} relay hubs and "
+                f"{fmt_pct(float(row_2030['dual_role_pct']), 2)} dual-role peri-urban hubs."
+            ),
+        },
+        {
+            "style": "Bullet",
+            "text": (
+                f"- Limitation to state explicitly: relay readiness is {fmt_pct(float(row_2030['relay_readiness_pct']), 2)}, "
+                "below the nominal 80% target because many short markets are optimally served directly."
             ),
         },
         {"style": "Caption", "text": "Figure 1. Task 5 topology KPIs by year."},
@@ -717,6 +866,38 @@ def styles_xml() -> str:
     <w:basedOn w:val="Normal"/>
     <w:pPr><w:spacing w:before="180" w:after="100"/></w:pPr>
     <w:rPr><w:b/><w:sz w:val="26"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2">
+    <w:name w:val="heading 2"/>
+    <w:basedOn w:val="Normal"/>
+    <w:pPr><w:spacing w:before="120" w:after="40"/></w:pPr>
+    <w:rPr><w:b/><w:sz w:val="22"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="SpecLine">
+    <w:name w:val="SpecLine"/>
+    <w:basedOn w:val="Normal"/>
+    <w:pPr><w:spacing w:after="90"/></w:pPr>
+    <w:rPr><w:b/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Bullet">
+    <w:name w:val="Bullet"/>
+    <w:basedOn w:val="Normal"/>
+    <w:pPr>
+      <w:spacing w:after="40" w:line="260" w:lineRule="auto"/>
+      <w:ind w:left="360" w:hanging="180"/>
+    </w:pPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Formula">
+    <w:name w:val="Formula"/>
+    <w:basedOn w:val="Normal"/>
+    <w:pPr>
+      <w:spacing w:before="20" w:after="60"/>
+      <w:ind w:left="540"/>
+    </w:pPr>
+    <w:rPr>
+      <w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>
+      <w:sz w:val="20"/>
+    </w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Caption">
     <w:name w:val="Caption"/>
